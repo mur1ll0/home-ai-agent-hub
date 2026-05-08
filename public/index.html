@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Home AI Agent Hub</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="topbar">
+          <p class="kicker">Home AI Agent Hub</p>
+          <a
+            class="langchain-link"
+            href="/v1/langgraph/open"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            Abrir LangGraph Studio
+          </a>
+        </div>
+
+        <form id="agent-form" class="composer">
+          <label for="prompt">Solicitação</label>
+          <textarea
+            id="prompt"
+            name="prompt"
+            rows="5"
+            placeholder="Ex: Olhe na área de trabalho e crie uma planilha catalogando todos os arquivos"
+            required
+          ></textarea>
+
+          <div class="model-selector-wrap">
+            <label class="model-selector-label">Modelo de LLM</label>
+            <div class="model-selector" id="model-selector" aria-haspopup="listbox" aria-expanded="false">
+              <button type="button" class="model-selector-trigger" id="model-selector-trigger" aria-controls="model-selector-dropdown">
+                <span id="model-selector-display">auto (OpenRouter)</span>
+                <svg class="model-selector-chevron" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M3 9L7 5L11 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button type="submit" id="submit-btn">Executar</button>
+            <button type="button" id="tools-btn" class="secondary">Tools e MCP</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel output-shell">
+        <div class="tabs" role="tablist" aria-label="Abas de execução">
+          <button type="button" class="tab active" data-tab="response">Resposta</button>
+          <button type="button" class="tab" data-tab="report">Relatório de execução</button>
+        </div>
+
+        <section class="scrollbox tab-pane active" id="response-pane">
+          <p class="muted">Nenhuma execução ainda.</p>
+        </section>
+
+        <section class="scrollbox tab-pane" id="report-pane">
+          <p class="muted">O relatório técnico completo aparecerá aqui após o primeiro prompt.</p>
+        </section>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <div id="model-tooltip" class="model-tooltip" role="tooltip" aria-hidden="true"></div>
+    <div class="model-dropdown" id="model-selector-dropdown" role="listbox" hidden>
+      <div class="model-search-wrap">
+        <input
+          type="search"
+          id="model-search"
+          class="model-search-input"
+          placeholder="Pesquisar modelo..."
+          autocomplete="off"
+          aria-label="Pesquisar modelo"
+        />
+      </div>
+      <div class="model-dropdown-body" id="model-dropdown-body">
+        <p class="model-loading">Carregando modelos...</p>
+      </div>
+    </div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

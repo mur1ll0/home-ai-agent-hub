@@ -1,0 +1,135 @@
+{
+  "name": "home-ai-agent",
+  "displayName": "Home AI Agent",
+  "description": "Agente pessoal de IA integrado ao VS Code, powered by OpenRouter e LangChain.",
+  "version": "0.1.0",
+  "publisher": "home-ai-agent-hub",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/home-ai-agent-hub/home-ai-agent-hub.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Home AI Agent",
+      "properties": {
+        "homeAgent.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "URL do servidor do Home AI Agent Hub."
+        },
+        "homeAgent.userId": {
+          "type": "string",
+          "default": "vscode-user",
+          "description": "Identificador de usuário enviado ao agente."
+        },
+        "homeAgent.sendFileContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Incluir caminho e seleção do arquivo ativo no contexto enviado ao agente."
+        },
+        "homeAgent.includeActiveFileContents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Incluir automaticamente o conteúdo completo do arquivo ativo no prompt enviado pela extensão."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "home-agent-sidebar",
+          "title": "Home AI Agent",
+          "icon": "media/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "home-agent-sidebar": [
+        {
+          "type": "webview",
+          "id": "homeAgent.sidebar",
+          "name": "Chat",
+          "icon": "media/sidebar-icon.svg",
+          "contextualTitle": "Home AI Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "homeAgent.sendSelection",
+        "title": "Enviar seleção ao agente",
+        "category": "Home AI Agent"
+      },
+      {
+        "command": "homeAgent.openPanel",
+        "title": "Abrir painel do agente",
+        "category": "Home AI Agent"
+      },
+      {
+        "command": "homeAgent.reloadExtensionHost",
+        "title": "Recarregar janela para atualizar a extensão",
+        "category": "Home AI Agent"
+      },
+      {
+        "command": "homeAgent.checkHealth",
+        "title": "Verificar conexão com o servidor",
+        "category": "Home AI Agent"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "homeAgent.sendSelection",
+          "when": "editorHasSelection",
+          "group": "homeAgent@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "homeAgent.sendSelection"
+        },
+        {
+          "command": "homeAgent.openPanel"
+        },
+        {
+          "command": "homeAgent.reloadExtensionHost"
+        },
+        {
+          "command": "homeAgent.checkHealth"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "homeAgent.sendSelection",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
+        "when": "editorHasSelection"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "package": "vsce package --no-dependencies",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.18",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.9.3"
+  }
+}
