@@ -39,20 +39,21 @@ export interface ProgressState {
 export class AgentClient {
   constructor(private readonly serverUrl: string) {}
 
-  async execute(request: AgentExecuteRequest): Promise<AgentExecuteResponse> {
+  async execute(request: AgentExecuteRequest, signal?: AbortSignal): Promise<AgentExecuteResponse> {
     const body = JSON.stringify(request);
     const url = new URL('/v1/agent/execute', this.serverUrl);
-    const data = await this.post(url, body);
+    const data = await this.post(url, body, signal);
     return data as AgentExecuteResponse;
   }
 
   async pollProgress(
     requestId: string,
-    cursor: number
+    cursor: number,
+    signal?: AbortSignal
   ): Promise<ProgressState> {
     const url = new URL(`/v1/agent/progress/${encodeURIComponent(requestId)}`, this.serverUrl);
     url.searchParams.set('cursor', String(cursor));
-    const data = await this.get(url);
+    const data = await this.get(url, signal);
     return data as ProgressState;
   }
 
@@ -78,8 +79,9 @@ export class AgentClient {
     }
   }
 
-  private get(url: URL): Promise<unknown> {
+  private get(url: URL, signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error('Request aborted'));
       const lib = url.protocol === 'https:' ? https : http;
       const req = lib.get(url.toString(), { timeout: 10000 }, (res) => {
         let raw = '';
@@ -89,13 +91,16 @@ export class AgentClient {
           catch (e) { reject(new Error(`JSON parse error: ${raw.slice(0, 200)}`)); }
         });
       });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
+      const onAbort = () => { req.destroy(new Error('Request aborted')); };
+      signal?.addEventListener('abort', onAbort);
+      req.on('error', (err) => { signal?.removeEventListener('abort', onAbort); reject(err); });
+      req.on('timeout', () => { signal?.removeEventListener('abort', onAbort); req.destroy(); reject(new Error('Request timed out')); });
     });
   }
 
-  private post(url: URL, body: string): Promise<unknown> {
+  private post(url: URL, body: string, signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error('Request aborted'));
       const lib = url.protocol === 'https:' ? https : http;
       const options = {
         method: 'POST',
@@ -115,8 +120,10 @@ export class AgentClient {
         });
       });
 
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
+      const onAbort = () => { req.destroy(new Error('Request aborted')); };
+      signal?.addEventListener('abort', onAbort);
+      req.on('error', (err) => { signal?.removeEventListener('abort', onAbort); reject(err); });
+      req.on('timeout', () => { signal?.removeEventListener('abort', onAbort); req.destroy(); reject(new Error('Request timed out')); });
       req.write(body);
       req.end();
     });
@@ -139,5 +146,15 @@ export class AgentClient {
     }
 
     return results;
+  }
+
+  async cancel(requestId: string): Promise<boolean> {
+    try {
+      const url = new URL('/v1/agent/cancel', this.serverUrl);
+      await this.post(url, JSON.stringify({ requestId }));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

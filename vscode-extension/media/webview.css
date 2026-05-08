@@ -401,6 +401,12 @@ body {
 .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.btn-primary.danger {
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-errorForeground);
+  border: 1px solid var(--vscode-inputValidation-errorBorder);
+}
+
 /* === Scrollbar === */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -8,7 +8,8 @@ type WebviewMessage =
   | { type: 'confirm'; token: string; userId: string; sessionId: string }
   | { type: 'insertCode'; code: string; language: string }
   | { type: 'copyCode'; code: string }
-  | { type: 'ready' };
+  | { type: 'ready' }
+  | { type: 'cancel' };
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = 'homeAgent.sidebar';
@@ -16,6 +17,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _sessionId: string;
   private _lastResponse?: AgentExecuteResponse;
+  private _activeCancelTokens = new Set<string>();
+  private _currentExecutionRequestId?: string | null = null;
+  private _currentExecutionController?: AbortController | undefined;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -64,6 +68,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case 'execute':
           await this.handleExecute(msg.text, msg.sendFileContext, (msg as any).modelId);
           break;
+        case 'cancel': {
+          const id = this._currentExecutionRequestId;
+          if (!id) {
+            webviewView.webview.postMessage({ type: 'cancelled', message: 'Nenhuma execução ativa.' });
+            break;
+          }
+          // mark as cancelled so poll loop can stop
+          this._activeCancelTokens.add(id);
+          // abort any in-flight network requests handled by the client
+          try {
+            this._currentExecutionController?.abort();
+          } catch {
+            // ignore
+          }
+          try {
+            await this.getClient().cancel(id);
+          } catch {
+            // ignore cancel errors — backend may not support it
+          }
+          webviewView.webview.postMessage({ type: 'cancelled', message: 'Execução interrompida pelo usuário.' });
+          break;
+        }
         case 'requestAddFileContext': {
           // Build a payload containing the active file content regardless of config and send back
           const editor = vscode.window.activeTextEditor;
@@ -184,23 +210,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     let progressCursor = 0;
     let polling = true;
 
+    // create an AbortController for this execution so we can abort network requests
+    const execController = new AbortController();
+    const execSignal = execController.signal;
+
     const pollLoop = async (): Promise<void> => {
-      while (polling) {
+      while (polling && !this._activeCancelTokens.has(clientRequestId) && !execSignal.aborted) {
         await sleep(600);
         try {
-          const state = await client.pollProgress(clientRequestId, progressCursor);
+          const state = await client.pollProgress(clientRequestId, progressCursor, execSignal);
           for (const event of state.events) {
             this.postToWebview({ type: 'progress', stage: event.stage, message: event.message });
           }
           progressCursor = state.cursor;
           if (state.done) { polling = false; }
-        } catch {
-          // progress endpoint may not exist yet — ignore silently
+        } catch (e) {
+          // ignore silently (network errors or abort)
         }
       }
     };
 
     const pollPromise = pollLoop();
+
+    this._currentExecutionRequestId = clientRequestId;
+    // ensure not marked cancelled
+    this._activeCancelTokens.delete(clientRequestId);
+    // store controller so cancel message handler can abort
+    this._currentExecutionController = execController;
 
     try {
       const result = await client.execute({
@@ -211,10 +247,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         ...(fileContext?.workspaceRoot ? { workspaceRoot: fileContext.workspaceRoot } : {}),
         ...(fileContext?.activeFilePath ? { activeFilePath: fileContext.activeFilePath } : {}),
         ...(modelId ? { configuredModel: modelId } : {})
-      });
-
+      }, execSignal);
       polling = false;
       await pollPromise;
+
+      // if user cancelled during execution, notify and skip posting response
+      if (this._activeCancelTokens.has(clientRequestId)) {
+        this._activeCancelTokens.delete(clientRequestId);
+        this._currentExecutionRequestId = undefined;
+        this.postToWebview({ type: 'cancelled', message: 'Execução interrompida pelo usuário.' });
+        return;
+      }
 
       this._lastResponse = result;
       this.postToWebview({ type: 'response', result, userId, sessionId: this._sessionId });
@@ -222,8 +265,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       polling = false;
       await pollPromise;
       const message = error instanceof Error ? error.message : String(error);
-      this.postToWebview({ type: 'error', message });
+      if (this._activeCancelTokens.has(clientRequestId)) {
+        this._activeCancelTokens.delete(clientRequestId);
+        this.postToWebview({ type: 'cancelled', message: 'Execução interrompida pelo usuário.' });
+      } else {
+        this.postToWebview({ type: 'error', message });
+      }
+      this._currentExecutionRequestId = undefined;
     }
+    this._currentExecutionRequestId = undefined;
+    this._currentExecutionController = undefined;
   }
 
   private async handleConfirm(token: string, userId: string, sessionId: string): Promise<void> {

@@ -127,6 +127,12 @@
         appendError(msg.message);
         break;
 
+      case 'cancelled':
+        setLoading(false);
+        removeThinking();
+        appendMessage('agent', msg.message ?? 'Execução interrompida pelo usuário.', []);
+        break;
+
       case 'prefill':
         inputEl.value = msg.text ?? '';
         charCountEl.textContent = String(inputEl.value.length);
@@ -597,9 +603,26 @@
   /** @param {boolean} loading */
   function setLoading(loading) {
     isLoading = loading;
-    sendBtn.disabled = loading;
     inputEl.disabled = loading;
-    sendBtn.textContent = loading ? 'Aguardando...' : 'Enviar';
+    if (loading) {
+      // switch to a cancel button
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Interromper Execução';
+      sendBtn.classList.add('danger');
+      sendBtn.style.background = 'var(--vscode-inputValidation-errorBackground)';
+      sendBtn.style.color = 'var(--vscode-errorForeground)';
+      // override click to cancel
+      sendBtn.onclick = () => {
+        vscode.postMessage({ type: 'cancel' });
+      };
+    } else {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Enviar';
+      sendBtn.classList.remove('danger');
+      sendBtn.style.background = '';
+      sendBtn.style.color = '';
+      sendBtn.onclick = handleSend;
+    }
   }
 
   /** @param {boolean} connected */
