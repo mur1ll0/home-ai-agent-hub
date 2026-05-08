@@ -86,6 +86,10 @@ jobs:
 
           echo "new_version=$ROOT_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Compile extension
+        run: npm run compile
+        working-directory: vscode-extension
+
       - name: Build extension package (.vsix)
         run: npm run package
         working-directory: vscode-extension

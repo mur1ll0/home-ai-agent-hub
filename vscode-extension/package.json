@@ -123,7 +123,7 @@
   "scripts": {
     "compile": "tsc -p tsconfig.json",
     "watch": "tsc -watch -p tsconfig.json",
-    "package": "vsce package --no-dependencies",
+    "package": "npm run compile && vsce package --no-dependencies",
     "lint": "eslint src"
   },
   "devDependencies": {
