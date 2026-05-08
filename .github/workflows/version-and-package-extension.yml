@@ -1,0 +1,118 @@
+name: Version And Package Extension
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  version_and_package:
+    # Avoid recursive bump loop when this workflow commits version updates.
+    if: ${{ !contains(github.event.head_commit.message, '[skip version bump]') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+
+      - name: Detect bump type (major for merged PR commit, minor otherwise)
+        id: bump_type
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.sha;
+
+            let isMergedPrCommit = false;
+            try {
+              const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                owner,
+                repo,
+                commit_sha: sha,
+                mediaType: {
+                  previews: ['groot']
+                }
+              });
+
+              isMergedPrCommit = prs.some((pr) => pr.merged_at && pr.base?.ref === 'main');
+            } catch (error) {
+              core.warning(`PR association lookup failed: ${error.message}`);
+            }
+
+            if (!isMergedPrCommit) {
+              const { data: commit } = await github.rest.repos.getCommit({ owner, repo, ref: sha });
+              const parentCount = commit.parents?.length ?? 0;
+              const message = commit.commit?.message ?? '';
+              if (parentCount >= 2 || message.startsWith('Merge pull request')) {
+                isMergedPrCommit = true;
+              }
+            }
+
+            const bump = isMergedPrCommit ? 'major' : 'minor';
+            core.setOutput('bump', bump);
+            return bump;
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install extension dependencies
+        run: npm ci
+        working-directory: vscode-extension
+
+      - name: Bump root and extension versions
+        id: bump_versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUMP_TYPE="${{ steps.bump_type.outputs.bump }}"
+
+          ROOT_VERSION_RAW="$(npm version "$BUMP_TYPE" --no-git-tag-version)"
+          ROOT_VERSION="${ROOT_VERSION_RAW#v}"
+
+          npm version "$ROOT_VERSION" --no-git-tag-version --allow-same-version --prefix vscode-extension
+
+          echo "new_version=$ROOT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build extension package (.vsix)
+        run: npm run package
+        working-directory: vscode-extension
+
+      - name: Commit and push bumped versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NEW_VERSION="${{ steps.bump_versions.outputs.new_version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add package.json package-lock.json vscode-extension/package.json vscode-extension/package-lock.json
+
+          if git diff --cached --quiet; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+
+          git commit -m "ci: bump versions to v${NEW_VERSION} [skip version bump]"
+          git push
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: home-ai-agent-vsix-${{ steps.bump_versions.outputs.new_version }}
+          path: vscode-extension/*.vsix
+          if-no-files-found: error
