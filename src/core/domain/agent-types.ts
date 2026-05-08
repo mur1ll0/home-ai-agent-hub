@@ -49,7 +49,22 @@ export interface AgentResponse {
   status?: 'completed' | 'pending_confirmation' | 'rejected';
   confirmationToken?: string;
   approvalDescription?: string;
+  editedFiles?: EditedFileRecord[];
   executionReport?: ExecutionReport;
+}
+
+export type EditedFileStatus = 'pending' | 'kept' | 'reverted';
+
+export interface EditedFileRecord {
+  editId: string;
+  filePath: string;
+  backupPath?: string;
+  isNewFile: boolean;
+  status: EditedFileStatus;
+  userId: string;
+  sessionId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ToolUsage {

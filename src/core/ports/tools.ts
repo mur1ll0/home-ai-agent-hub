@@ -1,3 +1,10 @@
+import type { EditedFileRecord } from '../domain/agent-types.js';
+
+export interface FileEditActor {
+  userId: string;
+  sessionId: string;
+}
+
 export interface FileSystemTool {
   read(filePath: string): Promise<string>;
   write(filePath: string, content: string): Promise<void>;
@@ -6,6 +13,21 @@ export interface FileSystemTool {
   delete(filePath: string): Promise<void>;
   list(directoryPath: string): Promise<string[]>;
   listRecursive(directoryPath: string): Promise<string[]>;
+}
+
+export interface FileEditSessionTool {
+  writeWithBackup(filePath: string, content: string, actor: FileEditActor): Promise<EditedFileRecord>;
+  replaceWithBackup(
+    filePath: string,
+    search: string,
+    replaceWith: string,
+    actor: FileEditActor
+  ): Promise<EditedFileRecord>;
+  keep(editId: string, actor: FileEditActor): Promise<EditedFileRecord | null>;
+  reject(editId: string, actor: FileEditActor): Promise<EditedFileRecord | null>;
+  keepAll(actor: FileEditActor): Promise<EditedFileRecord[]>;
+  listPending(actor: FileEditActor): Promise<EditedFileRecord[]>;
+  openWithDefaultEditor(editId: string, actor: FileEditActor): Promise<EditedFileRecord | null>;
 }
 
 export interface WebTool {

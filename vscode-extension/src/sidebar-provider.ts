@@ -7,6 +7,7 @@ type WebviewMessage =
   | { type: 'requestAddFileContext' }
   | { type: 'confirm'; token: string; userId: string; sessionId: string }
   | { type: 'insertCode'; code: string; language: string }
+  | { type: 'openEditedFileInVsCode'; filePath: string }
   | { type: 'copyCode'; code: string }
   | { type: 'ready' }
   | { type: 'cancel' };
@@ -133,6 +134,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case 'insertCode':
           await this.handleInsertCode(msg.code);
           break;
+        case 'openEditedFileInVsCode':
+          await this.handleOpenEditedFile(msg.filePath);
+          break;
         case 'copyCode':
           await vscode.env.clipboard.writeText(msg.code);
           vscode.window.showInformationMessage('Código copiado para a área de transferência.');
@@ -198,7 +202,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     let fileContext: ReturnType<typeof buildActiveFileContextPayload> = null;
 
     if (sendFileContext) {
-      fileContext = buildActiveFileContextPayload();
+      fileContext = this.shouldAttachActiveFileContext(userText)
+        ? buildActiveFileContextPayload()
+        : null;
       if (fileContext) {
         text = `${fileContext.promptPrefix}\n\n${userText}`;
       }
@@ -316,8 +322,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     await vscode.commands.executeCommand('editor.action.formatDocument');
   }
 
+  private async handleOpenEditedFile(filePath: string): Promise<void> {
+    if (!filePath?.trim()) {
+      return;
+    }
+
+    try {
+      const uri = vscode.Uri.file(filePath);
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+        preserveFocus: false
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Não foi possível abrir o arquivo editado: ${message}`);
+    }
+  }
+
   private postToWebview(msg: unknown): void {
     this._view?.webview.postMessage(msg);
+  }
+
+  private shouldAttachActiveFileContext(userText: string): boolean {
+    const text = userText.trim();
+    if (!text) {
+      return false;
+    }
+
+    // If the user is clearly targeting another file/path (Desktop, explicit path, bare filename),
+    // avoid polluting the prompt with active editor contents.
+    const mentionsExternalTarget =
+      /(área de trabalho|area de trabalho|desktop)/i.test(text) ||
+      /[a-zA-Z]:\\[^\n\r]+/.test(text) ||
+      /(?:^|\s)(?:\.\.?[\\/]|workspace[\\/]|\/)[^\s]+/.test(text) ||
+      /\b[\w.-]+\.[a-zA-Z0-9]{1,16}\b/.test(text);
+
+    const isEditIntent =
+      /(editar|edite|alterar|altere|substituir|replace|escrever|escreva|write|salvar|save|atualizar)/i.test(text);
+
+    if (mentionsExternalTarget && isEditIntent) {
+      return false;
+    }
+
+    return true;
   }
 
   private buildHtml(webview: vscode.Webview): string {

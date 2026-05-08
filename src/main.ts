@@ -12,7 +12,13 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  const app = await createHttpServer(container.handleUserRequestUseCase, env, container.mcpConnector, container.forkForModel.bind(container));
+  const app = await createHttpServer(
+    container.handleUserRequestUseCase,
+    env,
+    container.mcpConnector,
+    container.forkForModel.bind(container),
+    container.fileEditSessionTool
+  );
   await app.listen({ host: env.HTTP_HOST, port: env.HTTP_PORT });
 
   if (env.APP_MODE === 'both') {

@@ -19,6 +19,17 @@ export interface AgentExecuteResponse {
   status?: 'completed' | 'pending_confirmation' | 'rejected';
   confirmationToken?: string;
   approvalDescription?: string;
+  editedFiles?: Array<{
+    editId: string;
+    filePath: string;
+    backupPath?: string;
+    isNewFile: boolean;
+    status: 'pending' | 'kept' | 'reverted';
+    userId: string;
+    sessionId: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
   executionReport?: Record<string, unknown>;
 }
 

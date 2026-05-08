@@ -12,7 +12,7 @@ import {
   AgentHttpResponseSchema
 } from '../contracts/agent-http.contract.js';
 import type { AppEnv } from '../../infrastructure/config/env.js';
-import type { McpToolConnector } from '../../core/ports/tools.js';
+import type { FileEditSessionTool, McpToolConnector } from '../../core/ports/tools.js';
 
 const OLLAMA_API_URL = 'http://localhost:11434';
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
@@ -28,7 +28,8 @@ export async function createHttpServer(
   useCase: HandleUserRequestUseCase,
   env: AppEnv,
   mcpConnector?: McpToolConnector,
-  forkForModel?: (modelId: string) => HandleUserRequestUseCase
+  forkForModel?: (modelId: string) => HandleUserRequestUseCase,
+  fileEditSessionTool?: FileEditSessionTool
 ): Promise<ReturnType<typeof Fastify>> {
   const app = Fastify({ logger: true });
   const langgraphStudioTarget = env.LANGGRAPH_STUDIO_URL ?? 'http://localhost:2025';
@@ -237,6 +238,12 @@ export async function createHttpServer(
           status: 'available'
         },
         {
+          id: 'file.edit',
+          tool: 'InMemoryFileEditSessionTool',
+          category: 'filesystem',
+          status: fileEditSessionTool ? 'available' : 'disabled'
+        },
+        {
           id: 'fs.list',
           tool: 'LocalFileSystemTool.list',
           category: 'filesystem',
@@ -305,6 +312,101 @@ export async function createHttpServer(
         quickAddFields: ['serverName', 'transport', 'endpoint']
       }
     };
+  });
+
+  app.get('/v1/file-edits', async (request, reply) => {
+    if (!fileEditSessionTool) {
+      return reply.code(503).send({ error: 'file_edit_session_unavailable' });
+    }
+
+    const query = request.query as { userId?: string; sessionId?: string };
+    const userId = query.userId?.trim();
+    const sessionId = query.sessionId?.trim();
+    if (!userId || !sessionId) {
+      return reply.code(400).send({ error: 'invalid_actor' });
+    }
+
+    const editedFiles = await fileEditSessionTool.listPending({ userId, sessionId });
+    return reply.code(200).send({ editedFiles });
+  });
+
+  app.post('/v1/file-edits/keep', async (request, reply) => {
+    if (!fileEditSessionTool) {
+      return reply.code(503).send({ error: 'file_edit_session_unavailable' });
+    }
+
+    const body = request.body as { editId?: string; userId?: string; sessionId?: string };
+    const editId = body.editId?.trim();
+    const userId = body.userId?.trim();
+    const sessionId = body.sessionId?.trim();
+    if (!editId || !userId || !sessionId) {
+      return reply.code(400).send({ error: 'invalid_request' });
+    }
+
+    const editedFile = await fileEditSessionTool.keep(editId, { userId, sessionId });
+    if (!editedFile) {
+      return reply.code(404).send({ error: 'edited_file_not_found' });
+    }
+
+    return reply.code(200).send({ editedFile });
+  });
+
+  app.post('/v1/file-edits/reject', async (request, reply) => {
+    if (!fileEditSessionTool) {
+      return reply.code(503).send({ error: 'file_edit_session_unavailable' });
+    }
+
+    const body = request.body as { editId?: string; userId?: string; sessionId?: string };
+    const editId = body.editId?.trim();
+    const userId = body.userId?.trim();
+    const sessionId = body.sessionId?.trim();
+    if (!editId || !userId || !sessionId) {
+      return reply.code(400).send({ error: 'invalid_request' });
+    }
+
+    const editedFile = await fileEditSessionTool.reject(editId, { userId, sessionId });
+    if (!editedFile) {
+      return reply.code(404).send({ error: 'edited_file_not_found' });
+    }
+
+    return reply.code(200).send({ editedFile });
+  });
+
+  app.post('/v1/file-edits/keep-all', async (request, reply) => {
+    if (!fileEditSessionTool) {
+      return reply.code(503).send({ error: 'file_edit_session_unavailable' });
+    }
+
+    const body = request.body as { userId?: string; sessionId?: string };
+    const userId = body.userId?.trim();
+    const sessionId = body.sessionId?.trim();
+    if (!userId || !sessionId) {
+      return reply.code(400).send({ error: 'invalid_actor' });
+    }
+
+    const editedFiles = await fileEditSessionTool.keepAll({ userId, sessionId });
+    return reply.code(200).send({ editedFiles });
+  });
+
+  app.post('/v1/file-edits/open', async (request, reply) => {
+    if (!fileEditSessionTool) {
+      return reply.code(503).send({ error: 'file_edit_session_unavailable' });
+    }
+
+    const body = request.body as { editId?: string; userId?: string; sessionId?: string };
+    const editId = body.editId?.trim();
+    const userId = body.userId?.trim();
+    const sessionId = body.sessionId?.trim();
+    if (!editId || !userId || !sessionId) {
+      return reply.code(400).send({ error: 'invalid_request' });
+    }
+
+    const editedFile = await fileEditSessionTool.openWithDefaultEditor(editId, { userId, sessionId });
+    if (!editedFile) {
+      return reply.code(404).send({ error: 'edited_file_not_found' });
+    }
+
+    return reply.code(200).send({ editedFile });
   });
 
   app.post('/v1/mcp/connect', async (request, reply) => {

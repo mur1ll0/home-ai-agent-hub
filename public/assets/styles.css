@@ -226,6 +226,52 @@ button:disabled {
   gap: 0.3rem;
 }
 
+.edited-files-panel {
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  padding: 0.7rem;
+  margin: 0.7rem 0;
+  background: rgba(1, 9, 16, 0.35);
+}
+
+.edited-files-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.edited-files-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.edited-files-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+}
+
+.edited-file-item {
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  padding: 0.55rem;
+  background: rgba(0, 8, 14, 0.35);
+}
+
+.edited-file-path {
+  margin: 0;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.edited-file-meta {
+  margin: 0.35rem 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--ink-1);
+}
+
 .process-time {
   color: var(--accent-2);
   font-family: 'IBM Plex Mono', monospace;

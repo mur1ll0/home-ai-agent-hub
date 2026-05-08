@@ -5,12 +5,20 @@ import type {
   ActionPlan,
   AgentRequest,
   AgentResponse,
+  EditedFileRecord,
   ExecutionReport,
   ModelUsage,
   ToolUsage
 } from '../../core/domain/agent-types.js';
 import type { ActionExecutor } from '../../core/ports/agent-services.js';
-import type { FileSystemTool, McpToolConnector, MediaTool, OfficeDocumentTool, WebTool } from '../../core/ports/tools.js';
+import type {
+  FileEditSessionTool,
+  FileSystemTool,
+  McpToolConnector,
+  MediaTool,
+  OfficeDocumentTool,
+  WebTool
+} from '../../core/ports/tools.js';
 import type { LlmGateway } from '../../infrastructure/llm/openrouter-chat.gateway.js';
 import { TaskPlannerService } from './task-planner.service.js';
 
@@ -26,8 +34,22 @@ interface TopicMedia {
   sourceUrl: string;
 }
 
+type ReplaceInstruction =
+  | {
+      mode: 'replace';
+      filePath: string;
+      search: string;
+      replaceWith: string;
+    }
+  | {
+      mode: 'overwrite';
+      filePath: string;
+      content: string;
+    };
+
 export class ActionExecutorService implements ActionExecutor {
   private readonly taskPlanner: TaskPlannerService;
+  private readonly recentFilePathByActor = new Map<string, string>();
 
   constructor(
     private readonly fileSystemTool: FileSystemTool,
@@ -35,7 +57,8 @@ export class ActionExecutorService implements ActionExecutor {
     private readonly officeTool: OfficeDocumentTool,
     private readonly mediaTool: MediaTool,
     private readonly mcpConnector: McpToolConnector,
-    private readonly llmGateway: LlmGateway
+    private readonly llmGateway: LlmGateway,
+    private readonly fileEditSessionTool?: FileEditSessionTool
   ) {
     this.taskPlanner = new TaskPlannerService(llmGateway);
   }
@@ -106,6 +129,7 @@ export class ActionExecutorService implements ActionExecutor {
         }
 
         const content = await this.fileSystemTool.read(target);
+        this.rememberResolvedFile(request, target);
 
         if (this.shouldSynthesizeReadAnswer(request.text)) {
           const synthesis = await this.llmGateway.askWithMeta(
@@ -159,12 +183,26 @@ export class ActionExecutorService implements ActionExecutor {
           request,
           this.parsePath(request.text) ?? './workspace/output.txt'
         );
-        await this.fileSystemTool.write(target, request.text);
+        const editedFile = this.fileEditSessionTool
+          ? await this.fileEditSessionTool.writeWithBackup(target, request.text, {
+              userId: request.userId,
+              sessionId: request.sessionId
+            })
+          : null;
+
+        if (!editedFile) {
+          await this.fileSystemTool.write(target, request.text);
+        }
+        this.rememberResolvedFile(request, target);
+
         return this.ok(`Arquivo escrito: ${target}`, ['Conteúdo salvo com sucesso'], {
           action: plan.action,
-          tool: 'LocalFileSystemTool.write',
+          tool: this.fileEditSessionTool
+            ? 'InMemoryFileEditSessionTool.writeWithBackup'
+            : 'LocalFileSystemTool.write',
           durationMs: Date.now() - start,
-          details: target
+          details: target,
+          ...(editedFile ? { editedFiles: [editedFile] } : {})
         });
       }
       case 'file.move': {
@@ -178,15 +216,60 @@ export class ActionExecutorService implements ActionExecutor {
         });
       }
       case 'file.replace': {
-        const [filePath, search, replaceWith] = this.parseReplaceArgs(request.text, request);
-        await this.fileSystemTool.replace(filePath, search, replaceWith);
-        return this.ok(`Conteúdo substituído em ${filePath}`, [
-          `Trecho substituído: "${search}" -> "${replaceWith}"`
+        const instruction = this.parseReplaceInstruction(request.text, request);
+
+        if (instruction.mode === 'replace') {
+          const { filePath, search, replaceWith } = instruction;
+          const editedFile = this.fileEditSessionTool
+            ? await this.fileEditSessionTool.replaceWithBackup(filePath, search, replaceWith, {
+                userId: request.userId,
+                sessionId: request.sessionId
+              })
+            : null;
+
+          if (!editedFile) {
+            await this.fileSystemTool.replace(filePath, search, replaceWith);
+          }
+          this.rememberResolvedFile(request, filePath);
+
+          return this.ok(`Conteúdo substituído em ${filePath}`, [
+            `Trecho substituído: "${search}" -> "${replaceWith}"`
+          ], {
+            action: plan.action,
+            tool: this.fileEditSessionTool
+              ? 'InMemoryFileEditSessionTool.replaceWithBackup'
+              : 'LocalFileSystemTool.replace',
+            durationMs: Date.now() - start,
+            details: filePath,
+            ...(editedFile ? { editedFiles: [editedFile] } : {})
+          });
+        }
+
+        const editedFile = this.fileEditSessionTool
+          ? await this.fileEditSessionTool.writeWithBackup(instruction.filePath, this.materializeOverwriteContent(instruction.content, request.text), {
+              userId: request.userId,
+              sessionId: request.sessionId
+            })
+          : null;
+
+        if (!editedFile) {
+          await this.fileSystemTool.write(
+            instruction.filePath,
+            this.materializeOverwriteContent(instruction.content, request.text)
+          );
+        }
+        this.rememberResolvedFile(request, instruction.filePath);
+
+        return this.ok(`Conteúdo atualizado em ${instruction.filePath}`, [
+          'Arquivo sobrescrito com novo conteúdo (fallback de edição).'
         ], {
           action: plan.action,
-          tool: 'LocalFileSystemTool.replace',
+          tool: this.fileEditSessionTool
+            ? 'InMemoryFileEditSessionTool.writeWithBackup'
+            : 'LocalFileSystemTool.write',
           durationMs: Date.now() - start,
-          details: filePath
+          details: instruction.filePath,
+          ...(editedFile ? { editedFiles: [editedFile] } : {})
         });
       }
       case 'file.delete': {
@@ -722,6 +805,11 @@ export class ActionExecutorService implements ActionExecutor {
       return path.normalize(repoRelative[0]);
     }
 
+    const bareFilename = text.match(/\b[\w.-]+\.[a-zA-Z0-9]{1,16}\b/);
+    if (bareFilename?.[0] && this.looksLikePath(bareFilename[0])) {
+      return path.normalize(bareFilename[0]);
+    }
+
     const unixLike = text.match(/\/[\w./-]+/);
     if (unixLike?.[0]) {
       return unixLike[0];
@@ -765,18 +853,108 @@ export class ActionExecutorService implements ActionExecutor {
     return [this.resolveRequestPath(request, source), this.resolveRequestPath(request, target)];
   }
 
-  private parseReplaceArgs(text: string, request: AgentRequest): [string, string, string] {
+  private parseReplaceInstruction(text: string, request: AgentRequest): ReplaceInstruction {
     const quoted = this.parseQuotedValues(text);
     const filePath = quoted[0];
     const search = quoted[1];
     const replaceWith = quoted[2];
     if (filePath && search && replaceWith && this.looksLikePath(filePath)) {
-      return [this.resolveRequestPath(request, path.normalize(filePath)), search, replaceWith];
+      return {
+        mode: 'replace',
+        filePath: this.resolveRequestPath(request, path.normalize(filePath)),
+        search,
+        replaceWith
+      };
+    }
+
+    const parsedPath = this.parsePath(text) ?? request.activeFilePath;
+    if (!parsedPath) {
+      throw new Error(
+        'Para file.replace use: substituir "caminho" "texto_antigo" "texto_novo" ou editar "caminho" "conteudo_novo".'
+      );
+    }
+
+    const resolvedPath = this.resolveRequestPath(request, path.normalize(parsedPath));
+    const overwriteCandidates = quoted.filter((value, index) => {
+      if (index === 0 && this.looksLikePath(value)) {
+        return false;
+      }
+
+      return value.trim().length > 0;
+    });
+
+    const overwriteContent = overwriteCandidates.at(-1);
+    if (overwriteContent) {
+      return {
+        mode: 'overwrite',
+        filePath: resolvedPath,
+        content: overwriteContent
+      };
+    }
+
+    const freeTextContent = this.extractOverwriteContentFromText(text, parsedPath);
+    if (freeTextContent) {
+      return {
+        mode: 'overwrite',
+        filePath: resolvedPath,
+        content: freeTextContent
+      };
     }
 
     throw new Error(
-      'Para file.replace use: substituir "caminho" "texto_antigo" "texto_novo".'
+      'Para file.replace use: substituir "caminho" "texto_antigo" "texto_novo" ou editar "caminho" "conteudo_novo".'
     );
+  }
+
+  private extractOverwriteContentFromText(text: string, parsedPath: string): string | null {
+    const normalizedPath = parsedPath.replaceAll('\\', '/');
+    const compact = text.replaceAll('\\', '/');
+
+    const pathIndex = compact.toLowerCase().indexOf(normalizedPath.toLowerCase());
+    if (pathIndex < 0) {
+      return null;
+    }
+
+    const afterPath = compact.slice(pathIndex + normalizedPath.length).trim();
+    if (!afterPath) {
+      return null;
+    }
+
+    const cleaned = afterPath
+      .replace(/^[,:;\-]+\s*/g, '')
+      .replace(/^(com|para|por|conteudo|conteúdo|content)\b\s*/i, '')
+      .trim();
+
+    if (!cleaned || cleaned.length < 2) {
+      return null;
+    }
+
+    return cleaned;
+  }
+
+  private materializeOverwriteContent(content: string, originalPrompt: string): string {
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return trimmed;
+    }
+
+    const asksModelData =
+      /(modelo\s+de\s+llm|llm\s+usad[oa]|modelo\s+usad[oa]|model\s+in\s+use)/i.test(trimmed) ||
+      /(modelo\s+de\s+llm|llm\s+usad[oa]|modelo\s+usad[oa]|model\s+in\s+use)/i.test(originalPrompt);
+
+    if (asksModelData) {
+      const modelInfo = this.llmGateway.getModelInfo();
+      return [
+        `modelo: ${modelInfo.model}`,
+        `provider: ${modelInfo.provider}`,
+        `context_window_tokens: ${modelInfo.contextWindowTokens}`
+      ].join('\n');
+    }
+
+    return trimmed
+      .replace(/^escreva\s+nele\s+/i, '')
+      .replace(/^write\s+(in|into)\s+(it|file)\s+/i, '')
+      .trim();
   }
 
   private parseQuotedValues(text: string): string[] {
@@ -808,7 +986,37 @@ export class ActionExecutorService implements ActionExecutor {
       return path.resolve(root, normalizedRelative);
     }
 
+    if (this.isBareFilename(targetPath)) {
+      const actorKey = this.buildActorKey(request);
+      const remembered = this.recentFilePathByActor.get(actorKey);
+      if (remembered) {
+        return path.resolve(path.dirname(remembered), targetPath);
+      }
+
+      if (this.isDesktopIntent(request.text)) {
+        return path.resolve(os.homedir(), 'Desktop', targetPath);
+      }
+    }
+
     return path.resolve(targetPath);
+  }
+
+  private buildActorKey(request: AgentRequest): string {
+    return `${request.userId}::${request.sessionId}`;
+  }
+
+  private rememberResolvedFile(request: AgentRequest, resolvedPath: string): void {
+    const actorKey = this.buildActorKey(request);
+    this.recentFilePathByActor.set(actorKey, path.resolve(resolvedPath));
+  }
+
+  private isBareFilename(targetPath: string): boolean {
+    const normalized = targetPath.replaceAll('\\', '/');
+    return !normalized.includes('/') && /^[\w.-]+\.[a-zA-Z0-9]{1,16}$/.test(normalized);
+  }
+
+  private isDesktopIntent(text: string): boolean {
+    return /(área de trabalho|area de trabalho|desktop)/i.test(text);
   }
 
   private stripWorkspaceFolderPrefix(targetPath: string, workspaceRoot: string): string {
@@ -837,6 +1045,7 @@ export class ActionExecutorService implements ActionExecutor {
       details?: string;
       modelUsage?: ModelUsage;
       resolvedModel?: string;
+      editedFiles?: EditedFileRecord[];
     }
   ): AgentResponse {
     const modelInfo = this.llmGateway.getModelInfo();
@@ -884,6 +1093,7 @@ export class ActionExecutorService implements ActionExecutor {
       language: 'pt-BR',
       summary,
       steps,
+      ...(options.editedFiles ? { editedFiles: options.editedFiles } : {}),
       executionReport: report
     };
   }

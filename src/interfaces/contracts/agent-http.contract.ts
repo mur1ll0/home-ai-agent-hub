@@ -17,6 +17,21 @@ export const AgentHttpResponseSchema = z.object({
   status: z.enum(['completed', 'pending_confirmation', 'rejected']).optional(),
   confirmationToken: z.string().optional(),
   approvalDescription: z.string().optional(),
+  editedFiles: z
+    .array(
+      z.object({
+        editId: z.string(),
+        filePath: z.string(),
+        backupPath: z.string().optional(),
+        isNewFile: z.boolean(),
+        status: z.enum(['pending', 'kept', 'reverted']),
+        userId: z.string(),
+        sessionId: z.string(),
+        createdAt: z.string(),
+        updatedAt: z.string()
+      })
+    )
+    .optional(),
   executionReport: z.record(z.string(), z.unknown()).optional()
 });
 

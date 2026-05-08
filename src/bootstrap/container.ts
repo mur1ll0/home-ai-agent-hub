@@ -7,12 +7,13 @@ import { SafetyGuardService } from '../application/services/safety-guard.service
 import { SkillRegistryService } from '../application/services/skill-registry.service.js';
 import { HandleUserRequestUseCase } from '../core/use-cases/handle-user-request.use-case.js';
 import type { IntentClassifier, LanguageDetector, SafetyGuard } from '../core/ports/agent-services.js';
-import type { McpToolConnector } from '../core/ports/tools.js';
+import type { FileEditSessionTool, McpToolConnector } from '../core/ports/tools.js';
 import { JsonlAuditLogger } from '../infrastructure/audit/jsonl-audit.logger.js';
 import { loadAppEnv } from '../infrastructure/config/env.js';
 import { OllamaChatGateway } from '../infrastructure/llm/ollama-chat.gateway.js';
 import { OpenRouterChatGateway } from '../infrastructure/llm/openrouter-chat.gateway.js';
 import { ObsidianMemoryGateway } from '../infrastructure/memory/obsidian-memory.gateway.js';
+import { InMemoryFileEditSessionTool } from '../infrastructure/tools/filesystem/file-edit-session.tool.js';
 import { LocalFileSystemTool } from '../infrastructure/tools/filesystem/local-file-system.tool.js';
 import { McpToolConnectorImpl } from '../infrastructure/tools/mcp/mcp-tool-connector.js';
 import { MediaGenerationTool } from '../infrastructure/tools/media/media-generation.tool.js';
@@ -25,6 +26,7 @@ export interface AppContainer {
   languageDetector: LanguageDetector;
   safetyGuard: SafetyGuard;
   mcpConnector: McpToolConnector;
+  fileEditSessionTool: FileEditSessionTool;
   forkForModel(modelId: string): HandleUserRequestUseCase;
 }
 
@@ -38,6 +40,7 @@ export async function createContainer(): Promise<AppContainer> {
   const confirmationManager = new InMemoryConfirmationManagerService();
   const auditLogger = new JsonlAuditLogger(env.AGENT_AUDIT_LOG_PATH);
   const mcpConnector = new McpToolConnectorImpl();
+  const fileEditSessionTool = new InMemoryFileEditSessionTool();
   const memoryGateway =
     env.MEMORY_BACKEND === 'obsidian'
       ? new ObsidianMemoryGateway(env.OBSIDIAN_VAULT_PATH)
@@ -49,7 +52,8 @@ export async function createContainer(): Promise<AppContainer> {
     new OfficeDocumentToolImpl(),
     new MediaGenerationTool(llmGateway),
     mcpConnector,
-    llmGateway
+    llmGateway,
+    fileEditSessionTool
   );
 
   const skillRegistry = new SkillRegistryService();
@@ -65,7 +69,8 @@ export async function createContainer(): Promise<AppContainer> {
       new OfficeDocumentToolImpl(),
       new MediaGenerationTool(gw),
       mcpConnector,
-      gw
+      gw,
+      fileEditSessionTool
     );
     return new HandleUserRequestUseCase(
       ic,
@@ -94,6 +99,7 @@ export async function createContainer(): Promise<AppContainer> {
     languageDetector,
     safetyGuard,
     mcpConnector,
+    fileEditSessionTool,
     forkForModel,
     handleUserRequestUseCase: new HandleUserRequestUseCase(
       intentClassifier,

@@ -29,6 +29,7 @@
   let pendingConfirmation = /** @type {{ token: string; userId: string; sessionId: string } | null} */ (null);
   let isLoading = false;
   let activeFileContext = null;
+  let currentActor = /** @type {{ userId: string; sessionId: string } | null } */ (null);
   // Model selector state
   const storageSelectedModelKey = 'home-ai-agent-selected-model';
   let selectedModelId = localStorage.getItem(storageSelectedModelKey) ?? 'auto';
@@ -341,15 +342,17 @@
    * @param {string} userId
    * @param {string} sessionId */
   function handleResponse(result, userId, sessionId) {
+    currentActor = { userId, sessionId };
+
     if (result.status === 'pending_confirmation' && result.confirmationToken) {
       pendingConfirmation = { token: result.confirmationToken, userId, sessionId };
       showBanner(result.approvalDescription ?? 'Confirme a ação para continuar.');
 
-      appendMessage('agent', result.summary, result.steps ?? []);
+      appendMessage('agent', result.summary, result.steps ?? [], result.executionReport, result.editedFiles, currentActor);
     } else if (result.status === 'rejected') {
       appendError(result.summary);
     } else {
-      appendMessage('agent', result.summary, result.steps ?? [], result.executionReport);
+      appendMessage('agent', result.summary, result.steps ?? [], result.executionReport, result.editedFiles, currentActor);
     }
     scrollToBottom();
   }
@@ -410,8 +413,15 @@
     return /heur[íi]stica local: solicitação refere-se ao arquivo ativo/i.test(reason);
   }
 
-  /** @param {string} role @param {string} body @param {string[]} steps @param {object} [report] */
-  function appendMessage(role, body, steps, report) {
+  /**
+   * @param {string} role
+   * @param {string} body
+   * @param {string[]} steps
+   * @param {object} [report]
+   * @param {Array<any>} [editedFiles]
+   * @param {{ userId: string; sessionId: string } | null} [actor]
+   */
+  function appendMessage(role, body, steps, report, editedFiles, actor) {
     const wrap = document.createElement('div');
     wrap.className = `message ${role}`;
 
@@ -456,8 +466,178 @@
       wrap.appendChild(details);
     }
 
+    if (role === 'agent' && Array.isArray(editedFiles) && editedFiles.length > 0 && actor) {
+      wrap.appendChild(buildEditedFilesPanel(editedFiles, actor));
+    }
+
     messagesEl.appendChild(wrap);
     scrollToBottom();
+  }
+
+  /** @param {Array<any>} editedFiles @param {{ userId: string; sessionId: string }} actor */
+  function buildEditedFilesPanel(editedFiles, actor) {
+    const panel = document.createElement('section');
+    panel.className = 'edited-files-panel';
+
+    const head = document.createElement('div');
+    head.className = 'edited-files-head';
+
+    const title = document.createElement('strong');
+    title.textContent = 'Arquivos editados';
+    head.appendChild(title);
+
+    const keepAllBtn = document.createElement('button');
+    keepAllBtn.type = 'button';
+    keepAllBtn.className = 'code-action-btn primary';
+    keepAllBtn.textContent = 'Keep All';
+    keepAllBtn.addEventListener('click', async () => {
+      keepAllBtn.disabled = true;
+      const previous = keepAllBtn.textContent;
+      keepAllBtn.textContent = 'Aplicando...';
+      try {
+        await requestJson('/v1/file-edits/keep-all', {
+          method: 'POST',
+          body: {
+            userId: actor.userId,
+            sessionId: actor.sessionId
+          }
+        });
+        panel.querySelectorAll('[data-edit-status="pending"]').forEach((el) => {
+          el.textContent = 'kept';
+          el.setAttribute('data-edit-status', 'kept');
+        });
+        panel.querySelectorAll('[data-keep-btn], [data-reject-btn]').forEach((el) => {
+          if (el instanceof HTMLButtonElement) {
+            el.disabled = true;
+          }
+        });
+      } catch (error) {
+        appendError(error instanceof Error ? error.message : String(error));
+      } finally {
+        keepAllBtn.disabled = false;
+        keepAllBtn.textContent = previous;
+      }
+    });
+    head.appendChild(keepAllBtn);
+    panel.appendChild(head);
+
+    const list = document.createElement('div');
+    list.className = 'edited-files-list';
+
+    editedFiles.forEach((item) => {
+      const row = document.createElement('article');
+      row.className = 'edited-file-row';
+
+      const pathEl = document.createElement('div');
+      pathEl.className = 'edited-file-path';
+      pathEl.textContent = item.filePath ?? '-';
+      row.appendChild(pathEl);
+
+      const meta = document.createElement('div');
+      meta.className = 'edited-file-meta';
+      meta.textContent = item.isNewFile ? 'novo arquivo' : 'backup salvo';
+      row.appendChild(meta);
+
+      const status = document.createElement('span');
+      status.className = 'status-chip ok';
+      status.textContent = item.status ?? 'pending';
+      status.setAttribute('data-edit-status', item.status ?? 'pending');
+      row.appendChild(status);
+
+      const actions = document.createElement('div');
+      actions.className = 'code-block-actions';
+
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'code-action-btn';
+      openBtn.textContent = 'Abrir';
+      openBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'openEditedFileInVsCode', filePath: item.filePath });
+      });
+      actions.appendChild(openBtn);
+
+      const keepBtn = document.createElement('button');
+      keepBtn.type = 'button';
+      keepBtn.className = 'code-action-btn primary';
+      keepBtn.textContent = 'Keep';
+      keepBtn.setAttribute('data-keep-btn', item.editId ?? '');
+      keepBtn.disabled = item.status !== 'pending';
+      keepBtn.addEventListener('click', async () => {
+        await runEditAction('/v1/file-edits/keep', item.editId, actor, status, keepBtn, rejectBtn);
+      });
+      actions.appendChild(keepBtn);
+
+      const rejectBtn = document.createElement('button');
+      rejectBtn.type = 'button';
+      rejectBtn.className = 'code-action-btn';
+      rejectBtn.textContent = 'Reject';
+      rejectBtn.setAttribute('data-reject-btn', item.editId ?? '');
+      rejectBtn.disabled = item.status !== 'pending';
+      rejectBtn.addEventListener('click', async () => {
+        await runEditAction('/v1/file-edits/reject', item.editId, actor, status, keepBtn, rejectBtn);
+      });
+      actions.appendChild(rejectBtn);
+
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+
+    panel.appendChild(list);
+    return panel;
+  }
+
+  /**
+   * @param {string} endpoint
+   * @param {string} editId
+   * @param {{ userId: string; sessionId: string }} actor
+   * @param {HTMLElement} statusEl
+   * @param {HTMLButtonElement} keepBtn
+   * @param {HTMLButtonElement} rejectBtn
+   */
+  async function runEditAction(endpoint, editId, actor, statusEl, keepBtn, rejectBtn) {
+    if (!editId) {
+      return;
+    }
+
+    keepBtn.disabled = true;
+    rejectBtn.disabled = true;
+    try {
+      const payload = await requestJson(endpoint, {
+        method: 'POST',
+        body: {
+          editId,
+          userId: actor.userId,
+          sessionId: actor.sessionId
+        }
+      });
+      const nextStatus = payload?.editedFile?.status;
+      if (typeof nextStatus === 'string') {
+        statusEl.textContent = nextStatus;
+        statusEl.setAttribute('data-edit-status', nextStatus);
+      }
+    } catch (error) {
+      appendError(error instanceof Error ? error.message : String(error));
+      keepBtn.disabled = false;
+      rejectBtn.disabled = false;
+    }
+  }
+
+  /** @param {string} url @param {{ method?: string; body?: unknown }} options */
+  async function requestJson(url, options) {
+    const response = await fetch(url, {
+      method: options?.method ?? 'GET',
+      headers: {
+        'content-type': 'application/json'
+      },
+      ...(options?.body ? { body: JSON.stringify(options.body) } : {})
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = payload?.message ?? payload?.error ?? `Request failed: ${response.status}`;
+      throw new Error(message);
+    }
+    return payload;
   }
 
   /** @param {HTMLElement} container @param {string} text */

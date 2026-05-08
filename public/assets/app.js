@@ -811,6 +811,42 @@ function renderProcessingList(processingLogs) {
     .join('');
 }
 
+function renderEditedFilesPanel(editedFiles) {
+  if (!Array.isArray(editedFiles) || editedFiles.length === 0) {
+    return '';
+  }
+
+  const pendingCount = editedFiles.filter((item) => item?.status === 'pending').length;
+
+  return `
+    <section class="edited-files-panel">
+      <div class="edited-files-head">
+        <h3>Arquivos editados</h3>
+        <button type="button" class="mini-btn" data-edit-keep-all="true" ${pendingCount === 0 ? 'disabled' : ''}>Keep All</button>
+      </div>
+      <div class="edited-files-list">
+        ${editedFiles
+          .map((item) => {
+            const status = item?.status ?? 'pending';
+            const canDecide = status === 'pending';
+            return `
+              <article class="edited-file-item" data-edit-row="${escapeHtml(item.editId)}" data-edit-user="${escapeHtml(item.userId ?? '')}" data-edit-session="${escapeHtml(item.sessionId ?? '')}">
+                <p class="edited-file-path">${valueOrDash(item.filePath)}</p>
+                <p class="edited-file-meta">${item?.isNewFile ? 'novo arquivo' : 'backup salvo'} | status: <span data-edit-status>${escapeHtml(status)}</span></p>
+                <div class="inline-actions">
+                  <button type="button" class="mini-btn" data-edit-open="${escapeHtml(item.editId)}" data-edit-user="${escapeHtml(item.userId ?? '')}" data-edit-session="${escapeHtml(item.sessionId ?? '')}">Abrir</button>
+                  <button type="button" class="mini-btn" data-edit-keep="${escapeHtml(item.editId)}" data-edit-user="${escapeHtml(item.userId ?? '')}" data-edit-session="${escapeHtml(item.sessionId ?? '')}" ${canDecide ? '' : 'disabled'}>Keep</button>
+                  <button type="button" class="mini-btn danger" data-edit-reject="${escapeHtml(item.editId)}" data-edit-user="${escapeHtml(item.userId ?? '')}" data-edit-session="${escapeHtml(item.sessionId ?? '')}" ${canDecide ? '' : 'disabled'}>Reject</button>
+                </div>
+              </article>
+            `;
+          })
+          .join('')}
+      </div>
+    </section>
+  `;
+}
+
 function buildResponseBlockContent(payload, inputText, startedAt, finishedAt, processingLogs) {
   const status = payload.status ?? 'completed';
   const steps = Array.isArray(payload.steps) ? payload.steps : [];
@@ -852,6 +888,7 @@ function buildResponseBlockContent(payload, inputText, startedAt, finishedAt, pr
   const isProcessing = status === 'processing';
   const finalMarkdown = buildFinalMarkdown(payload);
   const hasFinalResult = !isProcessing && finalMarkdown.trim().length > 0;
+  const editedFilesHtml = !isProcessing ? renderEditedFilesPanel(payload.editedFiles) : '';
   const processingPanelAttrs = isProcessing ? ' open' : '';
 
   return `
@@ -876,6 +913,7 @@ function buildResponseBlockContent(payload, inputText, startedAt, finishedAt, pr
         ? `<section class="final-answer"><h3>Resultado Final</h3><div class="markdown-body">${renderMarkdown(finalMarkdown)}</div></section>`
         : ''
     }
+    ${editedFilesHtml}
     ${payload.approvalDescription ? `<p><strong>Aprovação necessária:</strong> ${escapeHtml(payload.approvalDescription)}</p>` : ''}
     ${
       !isProcessing && steps.length > 0
@@ -1133,6 +1171,57 @@ async function fetchProgress(requestId, cursor, options = {}) {
   }
 
   return response.json();
+}
+
+async function postEditedFileAction(endpoint, body) {
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.message ?? payload?.error ?? 'Falha ao aplicar ação de edição');
+  }
+
+  return payload;
+}
+
+function updateEditedRowStatus(editId, status) {
+  const row = responsePane.querySelector(`[data-edit-row="${CSS.escape(editId)}"]`);
+  if (!row) {
+    return;
+  }
+
+  const statusEl = row.querySelector('[data-edit-status]');
+  if (statusEl) {
+    statusEl.textContent = status;
+  }
+
+  if (status !== 'pending') {
+    row.querySelectorAll('[data-edit-keep], [data-edit-reject]').forEach((btn) => {
+      btn.setAttribute('disabled', 'true');
+    });
+  }
+}
+
+function markAllEditedRowsKept() {
+  responsePane.querySelectorAll('[data-edit-row]').forEach((row) => {
+    const statusEl = row.querySelector('[data-edit-status]');
+    if (statusEl) {
+      statusEl.textContent = 'kept';
+    }
+    row.querySelectorAll('[data-edit-keep], [data-edit-reject]').forEach((btn) => {
+      btn.setAttribute('disabled', 'true');
+    });
+  });
+  responsePane.querySelectorAll('[data-edit-keep-all="true"]').forEach((btn) => {
+    btn.setAttribute('disabled', 'true');
+    btn.textContent = 'Keep All';
+  });
 }
 
 async function askForConfirmationIfNeeded(payload, options = {}) {
@@ -1421,6 +1510,110 @@ toolsBtn?.addEventListener('click', async () => {
         title: 'Falha ao abrir configurações',
         text: error instanceof Error ? error.message : String(error)
       });
+    }
+  }
+});
+
+responsePane.addEventListener('click', async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const editIdOpen = target.getAttribute('data-edit-open');
+  if (editIdOpen) {
+    const actorUserId = target.getAttribute('data-edit-user') || getUserId();
+    const actorSessionId = target.getAttribute('data-edit-session') || getSessionId();
+    try {
+      await postEditedFileAction('/v1/file-edits/open', {
+        editId: editIdOpen,
+        userId: actorUserId,
+        sessionId: actorSessionId
+      });
+    } catch (error) {
+      if (typeof window.Swal !== 'undefined') {
+        window.Swal.fire({
+          icon: 'error',
+          title: 'Falha ao abrir arquivo',
+          text: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return;
+  }
+
+  const editIdKeep = target.getAttribute('data-edit-keep');
+  if (editIdKeep) {
+    const actorUserId = target.getAttribute('data-edit-user') || getUserId();
+    const actorSessionId = target.getAttribute('data-edit-session') || getSessionId();
+    try {
+      const payload = await postEditedFileAction('/v1/file-edits/keep', {
+        editId: editIdKeep,
+        userId: actorUserId,
+        sessionId: actorSessionId
+      });
+      updateEditedRowStatus(editIdKeep, payload?.editedFile?.status ?? 'kept');
+    } catch (error) {
+      if (typeof window.Swal !== 'undefined') {
+        window.Swal.fire({
+          icon: 'error',
+          title: 'Falha ao manter edição',
+          text: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return;
+  }
+
+  const editIdReject = target.getAttribute('data-edit-reject');
+  if (editIdReject) {
+    const actorUserId = target.getAttribute('data-edit-user') || getUserId();
+    const actorSessionId = target.getAttribute('data-edit-session') || getSessionId();
+    try {
+      const payload = await postEditedFileAction('/v1/file-edits/reject', {
+        editId: editIdReject,
+        userId: actorUserId,
+        sessionId: actorSessionId
+      });
+      updateEditedRowStatus(editIdReject, payload?.editedFile?.status ?? 'reverted');
+    } catch (error) {
+      if (typeof window.Swal !== 'undefined') {
+        window.Swal.fire({
+          icon: 'error',
+          title: 'Falha ao reverter edição',
+          text: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return;
+  }
+
+  const keepAll = target.getAttribute('data-edit-keep-all');
+  if (keepAll === 'true') {
+    const firstRow = responsePane.querySelector('[data-edit-row]');
+    const actorUserId = firstRow?.getAttribute('data-edit-user') || getUserId();
+    const actorSessionId = firstRow?.getAttribute('data-edit-session') || getSessionId();
+    const previousText = target.textContent;
+    target.setAttribute('disabled', 'true');
+    target.textContent = 'Aplicando...';
+    try {
+      await postEditedFileAction('/v1/file-edits/keep-all', {
+        userId: actorUserId,
+        sessionId: actorSessionId
+      });
+      markAllEditedRowsKept();
+    } catch (error) {
+      target.removeAttribute('disabled');
+      if (typeof previousText === 'string') {
+        target.textContent = previousText;
+      }
+      if (typeof window.Swal !== 'undefined') {
+        window.Swal.fire({
+          icon: 'error',
+          title: 'Falha ao aplicar Keep All',
+          text: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
   }
 });

@@ -514,4 +514,245 @@ describe('ActionExecutorService', () => {
     expect(response.summary).toContain('hub de agente de IA local');
     expect(response.steps[0]).toContain('Diretório analisado');
   });
+
+  it('aceita fallback de file.replace com caminho + novo conteúdo', async () => {
+    const fileSystemTool = {
+      read: vi.fn(),
+      write: vi.fn().mockResolvedValue(undefined),
+      move: vi.fn(),
+      replace: vi.fn(),
+      delete: vi.fn(),
+      list: vi.fn(),
+      listRecursive: vi.fn().mockResolvedValue([])
+    };
+
+    const sut = new ActionExecutorService(
+      fileSystemTool as never,
+      { extract: vi.fn(), search: vi.fn() } as never,
+      { createWord: vi.fn(), createSlides: vi.fn(), createSpreadsheet: vi.fn() } as never,
+      { generateImage: vi.fn(), generateVideo: vi.fn(), generate3D: vi.fn() } as never,
+      { connect: vi.fn() } as never,
+      {
+        ask: vi.fn(),
+        askWithMeta: vi.fn(),
+        getModelInfo: vi.fn().mockReturnValue({
+          provider: 'openrouter',
+          model: 'openrouter/auto',
+          contextWindowTokens: 128000
+        })
+      } as never
+    );
+
+    const workspaceRoot = path.resolve('f:/Node Projects/home-ai-agent-hub');
+    const expectedPath = path.join(workspaceRoot, 'workspace', 'testeeditar.txt');
+
+    const result = await sut.execute(
+      { action: 'file.replace', confidence: 0.9, reason: 'teste' },
+      {
+        text: 'editar "workspace/testeeditar.txt" "novo conteúdo completo"',
+        userId: 'u1',
+        sessionId: 's1',
+        workspaceRoot
+      }
+    );
+
+    expect(fileSystemTool.write).toHaveBeenCalledWith(expectedPath, 'novo conteúdo completo');
+    expect(fileSystemTool.replace).not.toHaveBeenCalled();
+    expect(result.summary).toContain('Conteúdo atualizado em');
+  });
+
+  it('aceita fallback de file.replace com conteúdo sem aspas no prompt', async () => {
+    const fileSystemTool = {
+      read: vi.fn(),
+      write: vi.fn().mockResolvedValue(undefined),
+      move: vi.fn(),
+      replace: vi.fn(),
+      delete: vi.fn(),
+      list: vi.fn(),
+      listRecursive: vi.fn().mockResolvedValue([])
+    };
+
+    const sut = new ActionExecutorService(
+      fileSystemTool as never,
+      { extract: vi.fn(), search: vi.fn() } as never,
+      { createWord: vi.fn(), createSlides: vi.fn(), createSpreadsheet: vi.fn() } as never,
+      { generateImage: vi.fn(), generateVideo: vi.fn(), generate3D: vi.fn() } as never,
+      { connect: vi.fn() } as never,
+      {
+        ask: vi.fn(),
+        askWithMeta: vi.fn(),
+        getModelInfo: vi.fn().mockReturnValue({
+          provider: 'openrouter',
+          model: 'openrouter/auto',
+          contextWindowTokens: 128000
+        })
+      } as never
+    );
+
+    const workspaceRoot = path.resolve('f:/Node Projects/home-ai-agent-hub');
+    const expectedPath = path.join(workspaceRoot, 'workspace', 'testeeditar.txt');
+
+    await sut.execute(
+      { action: 'file.replace', confidence: 0.9, reason: 'teste' },
+      {
+        text: 'editar workspace/testeeditar.txt com novo conteúdo completo sem aspas',
+        userId: 'u1',
+        sessionId: 's1',
+        workspaceRoot
+      }
+    );
+
+    expect(fileSystemTool.write).toHaveBeenCalledWith(
+      expectedPath,
+      'novo conteúdo completo sem aspas'
+    );
+    expect(fileSystemTool.replace).not.toHaveBeenCalled();
+  });
+
+  it('aceita fallback de file.replace com nome de arquivo simples sem aspas', async () => {
+    const fileSystemTool = {
+      read: vi.fn(),
+      write: vi.fn().mockResolvedValue(undefined),
+      move: vi.fn(),
+      replace: vi.fn(),
+      delete: vi.fn(),
+      list: vi.fn(),
+      listRecursive: vi.fn().mockResolvedValue([])
+    };
+
+    const sut = new ActionExecutorService(
+      fileSystemTool as never,
+      { extract: vi.fn(), search: vi.fn() } as never,
+      { createWord: vi.fn(), createSlides: vi.fn(), createSpreadsheet: vi.fn() } as never,
+      { generateImage: vi.fn(), generateVideo: vi.fn(), generate3D: vi.fn() } as never,
+      { connect: vi.fn() } as never,
+      {
+        ask: vi.fn(),
+        askWithMeta: vi.fn(),
+        getModelInfo: vi.fn().mockReturnValue({
+          provider: 'openrouter',
+          model: 'openrouter/auto',
+          contextWindowTokens: 128000
+        })
+      } as never
+    );
+
+    const workspaceRoot = path.resolve('f:/Node Projects/home-ai-agent-hub');
+    const expectedPath = path.join(workspaceRoot, 'testeeditar.txt');
+
+    await sut.execute(
+      { action: 'file.replace', confidence: 0.9, reason: 'teste' },
+      {
+        text: 'edite testeeditar.txt com dados do modelo de LLM',
+        userId: 'u1',
+        sessionId: 's1',
+        workspaceRoot
+      }
+    );
+
+    expect(fileSystemTool.write).toHaveBeenCalledWith(
+      expectedPath,
+      'modelo: openrouter/auto\nprovider: openrouter\ncontext_window_tokens: 128000'
+    );
+    expect(fileSystemTool.replace).not.toHaveBeenCalled();
+  });
+
+  it('materializa dados do modelo em vez de gravar instrucao literal', async () => {
+    const fileSystemTool = {
+      read: vi.fn(),
+      write: vi.fn().mockResolvedValue(undefined),
+      move: vi.fn(),
+      replace: vi.fn(),
+      delete: vi.fn(),
+      list: vi.fn(),
+      listRecursive: vi.fn().mockResolvedValue([])
+    };
+
+    const sut = new ActionExecutorService(
+      fileSystemTool as never,
+      { extract: vi.fn(), search: vi.fn() } as never,
+      { createWord: vi.fn(), createSlides: vi.fn(), createSpreadsheet: vi.fn() } as never,
+      { generateImage: vi.fn(), generateVideo: vi.fn(), generate3D: vi.fn() } as never,
+      { connect: vi.fn() } as never,
+      {
+        ask: vi.fn(),
+        askWithMeta: vi.fn(),
+        getModelInfo: vi.fn().mockReturnValue({
+          provider: 'openrouter',
+          model: 'openrouter/auto',
+          contextWindowTokens: 128000
+        })
+      } as never
+    );
+
+    const workspaceRoot = path.resolve('f:/Node Projects/home-ai-agent-hub');
+    const expectedPath = path.join(workspaceRoot, 'testeeditar.txt');
+
+    await sut.execute(
+      { action: 'file.replace', confidence: 0.9, reason: 'teste' },
+      {
+        text: 'edite testeeditar.txt e escreva nele os dados do modelo de LLM que está sendo usado',
+        userId: 'u1',
+        sessionId: 's1',
+        workspaceRoot
+      }
+    );
+
+    expect(fileSystemTool.write).toHaveBeenCalledWith(
+      expectedPath,
+      'modelo: openrouter/auto\nprovider: openrouter\ncontext_window_tokens: 128000'
+    );
+  });
+
+  it('salva edição no mesmo diretório do arquivo carregado anteriormente', async () => {
+    const fileSystemTool = {
+      read: vi.fn().mockResolvedValue('conteudo-lido'),
+      write: vi.fn().mockResolvedValue(undefined),
+      move: vi.fn(),
+      replace: vi.fn(),
+      delete: vi.fn(),
+      list: vi.fn(),
+      listRecursive: vi.fn().mockResolvedValue([])
+    };
+
+    const sut = new ActionExecutorService(
+      fileSystemTool as never,
+      { extract: vi.fn(), search: vi.fn() } as never,
+      { createWord: vi.fn(), createSlides: vi.fn(), createSpreadsheet: vi.fn() } as never,
+      { generateImage: vi.fn(), generateVideo: vi.fn(), generate3D: vi.fn() } as never,
+      { connect: vi.fn() } as never,
+      {
+        ask: vi.fn(),
+        askWithMeta: vi.fn(),
+        getModelInfo: vi.fn().mockReturnValue({
+          provider: 'openrouter',
+          model: 'openrouter/auto',
+          contextWindowTokens: 128000
+        })
+      } as never
+    );
+
+    const desktopFilePath = path.join(os.homedir(), 'Desktop', 'testeeditar.txt');
+
+    await sut.execute(
+      { action: 'file.read', confidence: 0.9, reason: 'teste' },
+      {
+        text: 'Leia o arquivo testeeditar.txt na minha área de trabalho',
+        userId: 'u1',
+        sessionId: 's1'
+      }
+    );
+
+    await sut.execute(
+      { action: 'file.replace', confidence: 0.9, reason: 'teste' },
+      {
+        text: 'edite testeeditar.txt com conteúdo atualizado',
+        userId: 'u1',
+        sessionId: 's1'
+      }
+    );
+
+    expect(fileSystemTool.read).toHaveBeenCalledWith(desktopFilePath);
+    expect(fileSystemTool.write).toHaveBeenCalledWith(desktopFilePath, 'conteúdo atualizado');
+  });
 });
