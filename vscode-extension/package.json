@@ -2,7 +2,7 @@
   "name": "home-ai-agent",
   "displayName": "Home AI Agent",
   "description": "Agente pessoal de IA integrado ao VS Code, powered by OpenRouter e LangChain.",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "publisher": "home-ai-agent-hub",
   "license": "MIT",
   "repository": {
