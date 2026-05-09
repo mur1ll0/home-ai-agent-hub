@@ -1,6 +1,6 @@
 {
   "name": "home-ai-agent-hub",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Agente pessoal de IA com OpenRouter, LangChain e arquitetura limpa",
   "type": "module",
   "main": "dist/main.js",
