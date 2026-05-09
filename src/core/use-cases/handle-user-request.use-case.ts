@@ -71,6 +71,12 @@ export class HandleUserRequestUseCase {
     }
 
     const processRequest = async (): Promise<AgentResponse> => {
+    // Ensure we have a workspace root: if the caller didn't provide one,
+    // default to the repository where the agent is running so the agent
+    // can autonomously search for specs/docs in the local repo.
+    if (!request.workspaceRoot || !request.workspaceRoot.trim()) {
+      request.workspaceRoot = process.cwd();
+    }
     const stages: ExecutionStage[] = [];
     const memoryReads: MemoryOperation[] = [];
     const memoryWrites: MemoryOperation[] = [];
@@ -491,6 +497,93 @@ export class HandleUserRequestUseCase {
         details: plan.reason
       });
 
+      // If the action produced a partial analysis due to budget, request user confirmation
+      const actionExecReport = actionResult.executionReport;
+      const partialFlag = actionExecReport?.notes?.some((n) => /partial_analysis|budget_exceeded/i.test(n));
+      const allowIncomplete = /\[ALLOW_INCOMPLETE\]/i.test(request.text);
+      if (partialFlag && this.confirmationManager && !allowIncomplete) {
+        const modifiedRequest: AgentRequest = {
+          ...request,
+          text: `${request.text}\n[ALLOW_INCOMPLETE]`
+        };
+        const ticket = await this.confirmationManager.createTicket(modifiedRequest, plan);
+        stages.push({
+          stage: 'partial_analysis_confirmation',
+          status: 'skipped',
+          durationMs: 0,
+          details: 'Análise parcial detectada; aguardando confirmação do usuário para executar versão incompleta.'
+        });
+
+        const pendingReportInput: any = {
+          request,
+          requestId,
+          startedAt,
+          startedAtMs,
+          stages,
+          memoryReads,
+          memoryWrites,
+          status: 'pending_confirmation',
+          summary: actionResult.summary,
+          intent: plan,
+          notes: ['Análise parcial: orçamento de contexto excedido. Confirme para executar incompleto.'],
+          ...(appliedSkill ? { appliedSkill } : {}),
+          ...(instructionVersion ? { instructionVersion } : {})
+        };
+        if (actionExecReport) pendingReportInput.actionExecutionReport = actionExecReport;
+        const pendingReport = this.buildExecutionReport(pendingReportInput);
+
+        await this.safeRememberMemory(request.userId, 'last_summary', actionResult.summary, memoryWrites);
+
+        return {
+          language: 'pt-BR',
+          status: 'pending_confirmation',
+          summary: 'Análise parcial gerada; falta espaço no contexto. Deseja executar mesmo assim (resultado incompleto)?',
+          approvalDescription: 'Executar análise mesmo com contexto incompleto (resultado pode ficar parcial).',
+          steps: ['Revise o relatório parcial e confirme para continuar com execução incompleta.'],
+          confirmationToken: ticket.token,
+          executionReport: pendingReport
+        };
+      }
+
+      // If the request already includes an explicit allowance to run incomplete,
+      // accept the partial result and return it as completed (annotated), instead
+      // of creating a new confirmation ticket.
+      if (partialFlag && allowIncomplete) {
+        stages.push({
+          stage: 'partial_analysis_applied',
+          status: 'completed',
+          durationMs: 0,
+          details: 'Usuário autorizou execução incompleta via [ALLOW_INCOMPLETE]. Resultado parcial aceito.'
+        });
+        const report = this.buildExecutionReport({
+          request,
+          requestId,
+          startedAt,
+          startedAtMs,
+          stages,
+          memoryReads,
+          memoryWrites,
+          status: 'completed',
+          summary: actionResult.summary,
+          intent: plan,
+          ...(actionResult.executionReport?.model ? { model: actionResult.executionReport.model } : {}),
+          ...(actionResult.executionReport?.resolvedModel
+            ? { resolvedModel: actionResult.executionReport.resolvedModel }
+            : {}),
+          ...(actionResult.executionReport?.tools ? { tools: actionResult.executionReport.tools } : {}),
+          notes: ['Usuário autorizou execução incompleta; resultado parcial retornado.']
+        });
+
+        await this.safeRememberMemory(request.userId, 'last_summary', actionResult.summary, memoryWrites);
+
+        return {
+          ...actionResult,
+          language: 'pt-BR',
+          status: 'completed',
+          executionReport: report
+        };
+      }
+
       const report = this.buildExecutionReport({
         request,
         requestId,
@@ -610,6 +703,7 @@ export class HandleUserRequestUseCase {
     resolvedModel?: string;
     tools?: ExecutionReport['tools'];
     notes: string[];
+    actionExecutionReport?: ExecutionReport;
     appliedSkill?: string;
     instructionVersion?: string;
   }): ExecutionReport {
@@ -687,6 +781,11 @@ export class HandleUserRequestUseCase {
     };
 
     const tools = input.tools ?? [];
+    const actionReport = input.actionExecutionReport;
+    // Merge tools from actionExecutionReport if present
+    if (actionReport?.tools && actionReport.tools.length > 0) {
+      tools.unshift(...actionReport.tools);
+    }
     if (tools.length === 0) {
       tools.push({
         tool: 'none',
@@ -701,12 +800,17 @@ export class HandleUserRequestUseCase {
       startedAt: input.startedAt.toISOString(),
       finishedAt: finishedAt.toISOString(),
       totalDurationMs: Date.now() - input.startedAtMs,
-      promptPreview,
-      promptChars,
+      // Prefer prompt preview/chars from the action-specific report when present
+      ...(actionReport?.promptPreview ? { promptPreview: actionReport.promptPreview } : { promptPreview }),
+      ...(typeof (actionReport as any)?.promptChars === 'number' ? { promptChars: (actionReport as any).promptChars } : { promptChars }),
       ...(input.intent ? { intent: input.intent } : {}),
       model,
       ...(input.resolvedModel ? { resolvedModel: input.resolvedModel } : {}),
-      llmInteractions,
+      // Expose explicit model limit and any reported charBudget from the action
+      ...(typeof model.contextWindowTokens === 'number' ? { modelLimitTokens: model.contextWindowTokens } : {}),
+      ...(typeof (actionReport as any)?.charBudget === 'number' ? { charBudget: (actionReport as any).charBudget } : {}),
+      // Prefer llmInteractions from action report when available
+      llmInteractions: actionReport?.llmInteractions ?? llmInteractions,
       tools,
       runtime,
       ...(input.request.workspaceRoot || input.request.activeFilePath
@@ -725,6 +829,7 @@ export class HandleUserRequestUseCase {
       stages: input.stages,
       notes: [
         ...input.notes,
+        ...(actionReport?.notes ?? []),
         ...(input.request.workspaceRoot
           ? [`workspace_root=${input.request.workspaceRoot}`]
           : []),
@@ -734,6 +839,10 @@ export class HandleUserRequestUseCase {
         `status_final=${input.status}`,
         `resumo=${input.summary}`
       ],
+      // If action reported a partial/budget exceeded condition, expose a short reason
+      ...(actionReport?.notes?.some((n) => /partial_analysis|budget_exceeded/i.test(n))
+        ? { rejectionReason: 'budget_exceeded' }
+        : {}),
       ...(input.appliedSkill ? { appliedSkill: input.appliedSkill } : {}),
       ...(input.instructionVersion ? { instructionVersion: input.instructionVersion } : {})
     };

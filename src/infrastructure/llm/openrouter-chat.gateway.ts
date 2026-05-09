@@ -23,7 +23,7 @@ export interface LlmResponse {
 export interface LlmGateway {
   ask(prompt: string, options?: { operation?: string; systemPrompt?: string }): Promise<string>;
   askWithMeta(prompt: string, options?: { operation?: string; systemPrompt?: string }): Promise<LlmResponse>;
-  getModelInfo(): Pick<LlmResponse, 'model' | 'provider' | 'contextWindowTokens'>;
+  getModelInfo(): Promise<Pick<LlmResponse, 'model' | 'provider' | 'contextWindowTokens'>>;
 }
 
 export class OpenRouterChatGateway implements LlmGateway, LlmTraceContext {
@@ -185,11 +185,50 @@ export class OpenRouterChatGateway implements LlmGateway, LlmTraceContext {
     }
   }
 
-  getModelInfo(): Pick<LlmResponse, 'model' | 'provider' | 'contextWindowTokens'> {
+  async getModelInfo(): Promise<Pick<LlmResponse, 'model' | 'provider' | 'contextWindowTokens'>> {
+    // Try to resolve the actual model the OpenRouter 'auto' selector will use.
+    const normalized = this.normalizeModelId(this.configuredModel);
+    let resolvedModelId: string | undefined;
+
+    // If we don't have a cached context for this model id, or the configured model
+    // appears to be an 'auto' selector, perform a lightweight probe to learn the
+    // resolved model id that the router will pick for requests.
+    const shouldProbe = normalized.includes('auto') || !this.modelContextById.has(normalized);
+
+    if (shouldProbe) {
+      try {
+        const probeMessages = [new HumanMessage('Please respond only with the model id you are running (one short token), no extra text.')];
+        const probeResp = await this.model.invoke(probeMessages);
+
+        const metadata = probeResp.response_metadata as
+          | { model?: string; model_name?: string; modelName?: string }
+          | undefined;
+
+        resolvedModelId = metadata?.model_name ?? metadata?.modelName ?? metadata?.model;
+
+        if (!resolvedModelId) {
+          const rawContent = probeResp.content;
+          const contentStr = typeof rawContent === 'string' ? rawContent.trim() : '';
+          if (contentStr && contentStr.length < 200) {
+            // fallback: use response content if it looks like an id
+            const parts = contentStr.split(/\s+/);
+            if (parts && parts[0]) {
+              resolvedModelId = parts[0].trim();
+            }
+          }
+        }
+      } catch {
+        // ignore probe failures and fallback to configured model
+      }
+    }
+
+    const modelToUse = resolvedModelId ?? this.configuredModel;
+    const usageContextWindowTokens = await this.resolveContextWindowTokens(modelToUse);
+
     return {
-      model: this.configuredModel,
+      model: modelToUse,
       provider: 'openrouter',
-      contextWindowTokens: this.contextWindowTokens
+      contextWindowTokens: usageContextWindowTokens
     };
   }
 

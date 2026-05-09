@@ -48,6 +48,8 @@ Este projeto implementa um agente pessoal de IA com Node 24.15.0, LangChain e Op
   - Serve para: seleção de modelos por tarefa, fallback, custo/latência e estratégia de provedores.
   - Acionar quando: mudanças em LLM, roteamento de modelo, tuning de qualidade, custo ou robustez.
 
+  - Nota importante: esta spec foi ampliada para incluir uma **Limitação conhecida: janelas de contexto variáveis** (resolução de `openrouter/auto` para modelos com janelas menores) e ações operacionais para mitigar truncamento de prompts, chunking e seleção de modelos. Todos os agentes e implementações que constroem prompts grandes devem ler essa seção antes de montar contextos de projeto/síntese.
+
 - `specs/04-security-and-safeguards.md`
   - Serve para: políticas de segurança, consentimento, bloqueios, validações e redução de risco.
   - Acionar quando: operações destrutivas, acesso a arquivos/web, dados sensíveis, execução de ações de risco.

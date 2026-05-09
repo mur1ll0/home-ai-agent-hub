@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: read
+  packages: write
 
 jobs:
   version_and_package:
@@ -120,3 +121,40 @@ jobs:
           name: home-ai-agent-vsix-${{ steps.bump_versions.outputs.new_version }}
           path: vscode-extension/*.vsix
           if-no-files-found: error
+
+      - name: Login to GitHub Container Registry
+        if: success()
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install ORAS client
+        if: success()
+        uses: oras-project/setup-oras@v1
+
+      - name: Publish VSIX to GitHub Packages (GHCR)
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.bump_versions.outputs.new_version }}"
+          OWNER_LOWER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LOWER}/home-ai-agent-extension"
+          VSIX_PATH="$(ls vscode-extension/*.vsix | head -n 1)"
+
+          oras push "${IMAGE}:v${VERSION}" \
+            --artifact-type "application/vnd.home-ai-agent.vsix" \
+            --annotation "org.opencontainers.image.title=home-ai-agent-vsix" \
+            --annotation "org.opencontainers.image.version=v${VERSION}" \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            "${VSIX_PATH}:application/vsix"
+
+          oras push "${IMAGE}:latest" \
+            --artifact-type "application/vnd.home-ai-agent.vsix" \
+            --annotation "org.opencontainers.image.title=home-ai-agent-vsix" \
+            --annotation "org.opencontainers.image.version=v${VERSION}" \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            "${VSIX_PATH}:application/vsix"

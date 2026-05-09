@@ -153,6 +153,15 @@ export interface ExecutionReport {
   notes: string[];
   appliedSkill?: string;
   instructionVersion?: string;
+  // Optional diagnostics added by action implementations
+  charBudget?: number;
+  finalPromptPreview?: string;
+  sampledFiles?: string[];
+  llmResponsePreview?: string;
+  // When an execution was intentionally left partial or rejected, a short reason code
+  rejectionReason?: string;
+  // Convenience: explicit model limit tokens (mirrors model.contextWindowTokens)
+  modelLimitTokens?: number;
 }
 
 export interface ActionPlan {

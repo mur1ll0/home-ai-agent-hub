@@ -106,7 +106,7 @@ export class OllamaChatGateway implements LlmGateway, LlmTraceContext {
     }
   }
 
-  getModelInfo(): Pick<LlmResponse, 'model' | 'provider' | 'contextWindowTokens'> {
+  async getModelInfo(): Promise<Pick<LlmResponse, 'model' | 'provider' | 'contextWindowTokens'>> {
     return {
       model: this.modelId,
       provider: 'openrouter',

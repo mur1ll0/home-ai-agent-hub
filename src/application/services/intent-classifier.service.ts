@@ -35,6 +35,12 @@ export class IntentClassifierService implements IntentClassifier {
   constructor(private readonly llmGateway: LlmGateway) {}
 
   async classify(input: AgentRequest): Promise<ActionPlan> {
+    // New: detect requests that ask to analyze the project and read "specs".
+    const specsHeuristic = this.classifySpecsAndRepoAnalysis(input);
+    if (specsHeuristic) {
+      return specsHeuristic;
+    }
+
     const projectSummaryHeuristic = this.classifyProjectSummaryFromContext(input);
     if (projectSummaryHeuristic) {
       return projectSummaryHeuristic;
@@ -97,6 +103,53 @@ export class IntentClassifierService implements IntentClassifier {
       action: 'chat.reply',
       confidence: 0.4,
       reason: `Fallback para chat.reply. Cadeia não retornou JSON válido: ${llmRaw.slice(0, 160)}`
+    };
+  }
+
+  /**
+   * Detects when the user asks the agent to analyze the project and read specs.
+   * If workspace root is not provided, the agent should search the repository
+   * where it's running (process.cwd()). Returns an ActionPlan that triggers
+   * a filesystem listing so the executor can discover .md/.txt docs and synthesize
+   * the next steps. If the prompt explicitly names a file/path the other
+   * heuristics will handle it.
+   */
+  private classifySpecsAndRepoAnalysis(input: AgentRequest): ActionPlan | null {
+    const text = input.text.trim();
+
+    const specsPatterns = [
+      /\b(specs?|specifica[cç][o~]es|especifica[cç][o~]es)\b/i,
+      /\blespecs\b/i,
+      /\bREADME\b/i
+    ];
+
+    const asksAnalyzeProjectAndSpecs = /analise\s+o\s+fonte\s+do\s+meu\s+projeto.*specs|analise.*specs|analise.*specifica[cç]o/i.test(
+      text
+    );
+
+    const mentionsSpecs = specsPatterns.some((p) => p.test(text));
+
+    if (!asksAnalyzeProjectAndSpecs && !mentionsSpecs) {
+      return null;
+    }
+
+    const workspaceProvided = Boolean(input.workspaceRoot && input.workspaceRoot.trim());
+    const reasonParts: string[] = [];
+    reasonParts.push('Solicitação detectada: análise de código + leitura de specs/documentação.');
+    if (workspaceProvided) {
+      reasonParts.push('Será usada a workspaceRoot fornecida pelo cliente.');
+    } else {
+      reasonParts.push('workspaceRoot não informado — usará o repositório onde o agente está rodando (process.cwd()).');
+    }
+
+    reasonParts.push('Ação proposta: listar diretório raiz e procurar arquivos .md/.txt para inferir specs.');
+
+    return {
+      action: 'fs.list',
+      confidence: 0.9,
+      reason: reasonParts.join(' '),
+      isComplexTask: true,
+      mainTopic: 'project-specs-analysis'
     };
   }
 

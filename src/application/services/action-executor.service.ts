@@ -246,7 +246,7 @@ export class ActionExecutorService implements ActionExecutor {
         }
 
         const editedFile = this.fileEditSessionTool
-          ? await this.fileEditSessionTool.writeWithBackup(instruction.filePath, this.materializeOverwriteContent(instruction.content, request.text), {
+          ? await this.fileEditSessionTool.writeWithBackup(instruction.filePath, await this.materializeOverwriteContent(instruction.content, request.text), {
               userId: request.userId,
               sessionId: request.sessionId
             })
@@ -255,7 +255,7 @@ export class ActionExecutorService implements ActionExecutor {
         if (!editedFile) {
           await this.fileSystemTool.write(
             instruction.filePath,
-            this.materializeOverwriteContent(instruction.content, request.text)
+            await this.materializeOverwriteContent(instruction.content, request.text)
           );
         }
         this.rememberResolvedFile(request, instruction.filePath);
@@ -291,11 +291,290 @@ export class ActionExecutorService implements ActionExecutor {
           this.parsePath(request.text) ?? request.workspaceRoot ?? './workspace'
         );
         const files = await this.fileSystemTool.list(target);
-        return this.ok(`Diretório listado: ${target}`, files.slice(0, 30), {
+        // If the intent requests a project/specs analysis, synthesize deeper
+        const wantsAnalysis =
+          plan?.mainTopic === 'project-specs-analysis' || /analise|analisar|specs|specifica[cç][aã]o|divergen/i.test(request.text);
+
+        if (!wantsAnalysis) {
+          return this.ok(`Diretório listado: ${target}`, files.slice(0, 30), {
+            action: plan.action,
+            tool: 'LocalFileSystemTool.list',
+            durationMs: Date.now() - start,
+            details: `${target} (${files.length} itens)`
+          });
+        }
+
+        // Only perform iterative loading when user asked for analysis and did not
+        // provide sufficient inline/contextual information. Detect explicit
+        // context (paths, quoted paths, code blocks or large inline content)
+        // and prefer targeted reads in that case.
+        // Build context from key docs (README, package.json, specs) and iteratively
+        // load source/spec files into the prompt until the model context budget is reached.
+        const directoryContext = await this.buildDirectorySummaryContext(target);
+
+        // Detect explicit context provided by the user to avoid unnecessary bulk loading
+        const explicitPath = this.parsePath(request.text);
+        const quotedValues = this.parseQuotedValues(request.text);
+        const hasQuotedPaths = quotedValues.some((v) => this.looksLikePath(v));
+        const hasCodeBlock = /```/.test(request.text);
+        const largeInline = request.text.length > 2000;
+
+        const userProvidedContext = Boolean(explicitPath || hasQuotedPaths || hasCodeBlock || largeInline);
+
+        if (userProvidedContext) {
+          // If user provided an explicit path, read that file and synthesize directly
+          if (explicitPath) {
+            try {
+              const resolved = this.resolveRequestPath(request, explicitPath);
+              const content = await this.fileSystemTool.read(resolved);
+              const synthesis = await this.llmGateway.askWithMeta(
+                [
+                  'Você é um auditor automático de projeto. Use o conteúdo do arquivo fornecido para comparar com as specs/documentação quando aplicável.',
+                  `Solicitação do usuário: ${request.text}`,
+                  `Arquivo analisado: ${resolved}`,
+                  'Conteúdo do arquivo:',
+                  content.slice(0, 24000)
+                ].join('\n\n'),
+                { operation: 'file_read_synthesis' }
+              );
+
+              return this.ok(synthesis.text.trim(), [`Arquivo analisado: ${resolved}`], {
+                action: plan.action,
+                tool: 'LocalFileSystemTool.read + OpenRouterChatGateway.askWithMeta',
+                durationMs: Date.now() - start,
+                details: resolved,
+                modelUsage: {
+                  provider: synthesis.provider,
+                  model: synthesis.model,
+                  contextWindowTokens: synthesis.contextWindowTokens
+                }
+              });
+            } catch {
+              // fall through to iterative behavior if read fails
+            }
+          }
+
+          // If user included a code block, use that inline content instead of scanning whole repo
+          if (hasCodeBlock) {
+            const codeMatch = request.text.match(/```([\s\S]*?)```/);
+            const codeContent = codeMatch?.[1] ?? request.text;
+            const synthesis = await this.llmGateway.askWithMeta(
+              [
+                'Você é um auditor automático de projeto. Use o conteúdo de código fornecido para inferir divergências com a documentação/specs quando aplicável.',
+                `Solicitação do usuário: ${request.text}`,
+                'Conteúdo fornecido:',
+                codeContent.slice(0, 24000)
+              ].join('\n\n'),
+              { operation: 'file_read_synthesis' }
+            );
+
+            return this.ok(synthesis.text.trim(), ['Conteúdo inline analisado (bloco de código)'], {
+              action: plan.action,
+              tool: 'inline_code + OpenRouterChatGateway.askWithMeta',
+              durationMs: Date.now() - start,
+              details: 'inline code block',
+              modelUsage: {
+                provider: synthesis.provider,
+                model: synthesis.model,
+                contextWindowTokens: synthesis.contextWindowTokens
+              }
+            });
+          }
+
+          // If large inline text or quoted paths exist but explicit read failed, continue to iterative loading below
+        }
+
+        const allFiles = await this.fileSystemTool.listRecursive(target).catch(() => [] as string[]);
+        const specFiles = allFiles.filter((f) => /(^|[\\/])specs[\\/]/i.test(f) || /\.(md|txt)$/i.test(f));
+        let sourceFiles = allFiles.filter((f) => /(^|[\\/])src[\\/]/i.test(f) && /\.(ts|js|tsx|jsx)$/i.test(f));
+
+        // If the directory listing contained an entry named 'src', prefer scanning it directly
+        // using the detected path (target/src) so we rely on the agent's earlier discovery.
+        const hasSrcDirInRootListing = files.some((e) => String(e).toLowerCase() === 'src' || String(e).toLowerCase().startsWith('src' + path.sep));
+        if ((sourceFiles.length === 0) && hasSrcDirInRootListing) {
+          try {
+            const srcDir = path.join(target, 'src');
+            const srcRecursive = await this.fileSystemTool.listRecursive(srcDir).catch(() => [] as string[]);
+            if (Array.isArray(srcRecursive) && srcRecursive.length > 0) {
+              const rel = srcRecursive.map((p) => path.relative(target, p).replaceAll('\\\\', '/'));
+              sourceFiles = rel.filter((r) => /\.(ts|js|tsx|jsx)$/i.test(r));
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        // Try a more robust source directory scan: listRecursive on target/src directly
+        // (some listRecursive implementations may not include nested files when called on root)
+        try {
+          const srcDir = path.join(target, 'src');
+          const srcRecursive = await this.fileSystemTool.listRecursive(srcDir).catch(() => [] as string[]);
+          if (Array.isArray(srcRecursive) && srcRecursive.length > 0) {
+            // convert absolute file paths to repo-relative paths
+            const rel = srcRecursive.map((p) => path.relative(target, p).replaceAll('\\\\', '/'));
+            sourceFiles = rel.filter((r) => /\.(ts|js|tsx|jsx)$/i.test(r));
+          }
+        } catch {
+          // ignore errors from direct src scan
+        }
+
+        // Compute character budget based on model context window (approx 4 chars/token) and leave margin
+        // Prefer an explicit model requested by the caller (`request.selectedModel`) because
+        // some earlier LLM calls (eg. security checks) may have used a smaller probe model.
+        let modelInfo = await this.llmGateway.getModelInfo();
+        if (request.selectedModel && typeof (this.llmGateway as any)?.forkWithModel === 'function') {
+          try {
+            modelInfo = await (this.llmGateway as any).forkWithModel(request.selectedModel).getModelInfo();
+          } catch {
+            // ignore and fall back to default gateway info
+          }
+        }
+        const tokens = modelInfo.contextWindowTokens ?? 128000;
+        const charPerToken = 4;
+        const margin = 0.6; // keep room for instructions and LLM reply
+        let charBudget = Math.floor(tokens * charPerToken * margin);
+        if (charBudget > 400000) charBudget = 400000;
+        if (charBudget < 50000) charBudget = 50000;
+
+        const addedFiles: string[] = [];
+        const addedSnippets: string[] = [];
+        const alreadyIncluded = new Set<string>();
+        // mark README and package.json as already included (buildDirectorySummaryContext read them)
+        alreadyIncluded.add('README.md');
+        alreadyIncluded.add('package.json');
+
+        const basePrompt = [
+          'Você é um auditor automático de projeto. Compare a implementação do projeto com a documentação/specs encontrada e reporte divergências claras, lacunas e recomendações de correção.',
+          `Solicitação do usuário: ${request.text}`,
+          `Diretório analisado: ${target}`,
+          `Listagem (até 120):\n${files.slice(0, 120).join('\n')}`,
+          'Contexto de arquivos-chave lidos:',
+          directoryContext,
+          'Amostra de arquivos de código lidos:'
+        ].join('\n\n');
+
+        let currentChars = basePrompt.length;
+        let needsChunking = false;
+
+        const tryAddFile = (relPath: string, content: string): boolean => {
+          if (alreadyIncluded.has(relPath)) return true;
+          const snippet = `${relPath}:\n${content}\n\n---\n\n`;
+          if (currentChars + snippet.length > charBudget) {
+            return false;
+          }
+          addedSnippets.push(snippet);
+          addedFiles.push(relPath);
+          alreadyIncluded.add(relPath);
+          currentChars += snippet.length;
+          return true;
+        };
+
+        // Prioritize spec files, then source files
+        for (const rel of specFiles) {
+          if (addedSnippets.length >= 30) break;
+          try {
+            const content = await this.fileSystemTool.read(path.join(target, rel));
+            const piece = content.slice(0, 24000);
+            if (!tryAddFile(rel, piece)) {
+              needsChunking = true;
+              break;
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!needsChunking) {
+          for (const rel of sourceFiles) {
+            if (addedSnippets.length >= 60) break;
+            try {
+              const content = await this.fileSystemTool.read(path.join(target, rel));
+              const piece = content.slice(0, 24000);
+              if (!tryAddFile(rel, piece)) {
+                needsChunking = true;
+                break;
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+
+        const allowIncomplete = /\[ALLOW_INCOMPLETE\]/i.test(request.text);
+        if (needsChunking && !allowIncomplete) {
+          const steps = [
+            `Diretório analisado: ${target}`,
+            `Arquivos encontrados: ${files.length}`,
+            `Documentos chave lidos: sim`,
+            `Arquivos amostrados: ${addedFiles.length}`,
+            'Contexto excedeu orçamento do modelo e requer análise em partes (chunking) para continuar.'
+          ];
+          return this.ok(
+            `Análise parcial concluída: ${addedFiles.length} arquivos amostrados. Contexto excedeu o orçamento do modelo; quebre a análise em partes.`,
+            steps,
+            {
+              action: plan.action,
+              tool:
+                'LocalFileSystemTool.list + LocalFileSystemTool.listRecursive + LocalFileSystemTool.read (partial)',
+              durationMs: Date.now() - start,
+              details: `${target} (${files.length} itens) - partial`,
+              ...(addedFiles.length ? { editedFiles: [] } : {}),
+              reportExtras: {
+                promptPreview: basePrompt.slice(0, 240),
+                promptChars: currentChars,
+                charBudget,
+                sampledFiles: addedFiles,
+                notes: ['partial_analysis: budget_exceeded']
+              }
+            }
+          );
+        }
+
+        // If the user explicitly allowed incomplete execution, continue with whatever was sampled.
+        // This prevents re-triggering the partial-analysis confirmation after the user approved.
+        if (needsChunking && allowIncomplete) {
+          // proceed to compose final prompt using the snippets we've added so far
+          // (they fit within charBudget because tryAddFile stops before exceeding)
+        }
+
+        // Compose final prompt with all added snippets
+        const finalPrompt = basePrompt + '\n\n' + addedSnippets.join('\n');
+
+        const synthesis = await this.llmGateway.askWithMeta(finalPrompt, {
+          operation: 'project_specs_comparison'
+        });
+
+        const steps: string[] = [
+          `Diretório analisado: ${target}`,
+          `Arquivos encontrados: ${files.length}`,
+          `Documentos chave lidos: sim`,
+          `Arquivos amostrados: ${addedFiles.length}`
+        ];
+
+        return this.ok(synthesis.text.trim(), steps, {
           action: plan.action,
-          tool: 'LocalFileSystemTool.list',
+          tool: 'LocalFileSystemTool.list + LocalFileSystemTool.listRecursive + LocalFileSystemTool.read + OpenRouterChatGateway.askWithMeta',
           durationMs: Date.now() - start,
-          details: `${target} (${files.length} itens)`
+          details: `${target} (${files.length} itens)`,
+          modelUsage: {
+            provider: synthesis.provider,
+            model: synthesis.model,
+            contextWindowTokens: synthesis.contextWindowTokens,
+            ...(typeof synthesis.usage?.inputTokens === 'number' ? { inputTokens: synthesis.usage.inputTokens } : {}),
+            ...(typeof synthesis.usage?.outputTokens === 'number' ? { outputTokens: synthesis.usage.outputTokens } : {}),
+            ...(typeof synthesis.usage?.totalTokens === 'number' ? { totalTokens: synthesis.usage.totalTokens } : {})
+          },
+          ...(synthesis.resolvedModel ? { resolvedModel: synthesis.resolvedModel } : {})
+          ,
+          reportExtras: {
+            promptPreview: finalPrompt.slice(0, 240),
+            promptChars: finalPrompt.length,
+            finalPromptPreview: finalPrompt.slice(0, 8000),
+            sampledFiles: addedFiles,
+            charBudget,
+            llmResponsePreview: synthesis.text.slice(0, 8000),
+            notes: ['project_specs_comparison: full_synthesis']
+          }
         });
       }
       case 'web.extract': {
@@ -733,20 +1012,41 @@ export class ActionExecutorService implements ActionExecutor {
 
   private async buildDirectorySummaryContext(directoryPath: string): Promise<string> {
     const snippets: string[] = [];
-    const candidateFiles = ['README.md', 'package.json', 'specs/00-product-vision.md'];
 
-    for (const relative of candidateFiles) {
-      const candidatePath = path.join(directoryPath, relative);
+    // Preferir arquivos óbvios em raiz
+    const preferred = ['README.md', 'README.MD', 'readme.md', 'package.json'];
+    for (const rel of preferred) {
       try {
+        const candidatePath = path.join(directoryPath, rel);
         const content = await this.fileSystemTool.read(candidatePath);
-        snippets.push(`${relative}:\n${content.slice(0, 5000)}`);
+        snippets.push(`${rel}:\n${content.slice(0, 5000)}`);
       } catch {
-        // Arquivo opcional; ignora quando ausente.
+        // ignora
       }
     }
 
+    // Se nada óbvio, ou para complementar, busca recursiva por .md/.txt em specs/ ou raiz
+    try {
+      const allFiles = await this.fileSystemTool.listRecursive(directoryPath).catch(() => [] as string[]);
+      const candidates = allFiles
+        .filter((f) => /(^|[\\/])specs[\\/]/i.test(f) || /\.(md|txt)$/i.test(f))
+        .slice(0, 20);
+
+      for (const rel of candidates) {
+        try {
+          const content = await this.fileSystemTool.read(path.join(directoryPath, rel));
+          snippets.push(`${rel}:\n${content.slice(0, 4000)}`);
+          if (snippets.length >= 6) break;
+        } catch {
+          // ignora problemas de leitura
+        }
+      }
+    } catch {
+      // fallback silencioso
+    }
+
     if (snippets.length === 0) {
-      return 'Nenhum arquivo de contexto (README/package/spec) pôde ser lido.';
+      return 'Nenhum arquivo de contexto (README/package/spec/.md/.txt) pôde ser lido.';
     }
 
     return `Contexto de arquivos-chave:\n\n${snippets.join('\n\n---\n\n')}`;
@@ -932,7 +1232,7 @@ export class ActionExecutorService implements ActionExecutor {
     return cleaned;
   }
 
-  private materializeOverwriteContent(content: string, originalPrompt: string): string {
+  private async materializeOverwriteContent(content: string, originalPrompt: string): Promise<string> {
     const trimmed = content.trim();
     if (!trimmed) {
       return trimmed;
@@ -943,7 +1243,7 @@ export class ActionExecutorService implements ActionExecutor {
       /(modelo\s+de\s+llm|llm\s+usad[oa]|modelo\s+usad[oa]|model\s+in\s+use)/i.test(originalPrompt);
 
     if (asksModelData) {
-      const modelInfo = this.llmGateway.getModelInfo();
+      const modelInfo = await this.llmGateway.getModelInfo();
       return [
         `modelo: ${modelInfo.model}`,
         `provider: ${modelInfo.provider}`,
@@ -1035,7 +1335,7 @@ export class ActionExecutorService implements ActionExecutor {
     return targetPath;
   }
 
-  private ok(
+  private async ok(
     summary: string,
     steps: string[],
     options: {
@@ -1046,9 +1346,10 @@ export class ActionExecutorService implements ActionExecutor {
       modelUsage?: ModelUsage;
       resolvedModel?: string;
       editedFiles?: EditedFileRecord[];
+      reportExtras?: Record<string, unknown>;
     }
-  ): AgentResponse {
-    const modelInfo = this.llmGateway.getModelInfo();
+  ): Promise<AgentResponse> {
+    const modelInfo = await this.llmGateway.getModelInfo();
     const fallbackModelUsage: ModelUsage = options.modelUsage ?? {
       provider: modelInfo.provider,
       model: modelInfo.model,
@@ -1063,17 +1364,19 @@ export class ActionExecutorService implements ActionExecutor {
       ...(options.details ? { details: options.details } : {})
     };
 
+    const reportExtras = options.reportExtras ?? {};
+
     const report: ExecutionReport = {
       requestId: '',
       startedAt: '',
       finishedAt: '',
       totalDurationMs: options.durationMs,
-      promptPreview: '',
-      promptChars: 0,
+      promptPreview: (reportExtras.promptPreview as string) ?? '',
+      promptChars: (reportExtras.promptChars as number) ?? 0,
       model: fallbackModelUsage,
       ...(options.resolvedModel ? { resolvedModel: options.resolvedModel } : {}),
-      llmInteractions: [],
-      tools: [toolUsage],
+      llmInteractions: (reportExtras.llmInteractions as ExecutionReport['llmInteractions']) ?? [],
+      tools: [toolUsage].concat((reportExtras.tools as ToolUsage[]) ?? []),
       runtime: {
         memoryRssMb: 0,
         memoryHeapUsedMb: 0,
@@ -1086,7 +1389,12 @@ export class ActionExecutorService implements ActionExecutor {
         writes: []
       },
       stages: [],
-      notes: []
+      notes: (reportExtras.notes as string[]) ?? [],
+      // pass-through diagnostics from reportExtras
+      ...(typeof (reportExtras.charBudget) === 'number' ? { charBudget: reportExtras.charBudget as number } : {}),
+      ...(reportExtras.finalPromptPreview ? { finalPromptPreview: reportExtras.finalPromptPreview as string } : {}),
+      ...(Array.isArray(reportExtras.sampledFiles) ? { sampledFiles: reportExtras.sampledFiles as string[] } : {}),
+      ...(reportExtras.llmResponsePreview ? { llmResponsePreview: reportExtras.llmResponsePreview as string } : {})
     };
 
     return {
