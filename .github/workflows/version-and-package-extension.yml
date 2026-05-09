@@ -115,46 +115,23 @@ jobs:
           git commit -m "ci: bump versions to v${NEW_VERSION} [skip version bump]"
           git push
 
-      - name: Upload extension artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
         with:
-          name: home-ai-agent-vsix-${{ steps.bump_versions.outputs.new_version }}
-          path: vscode-extension/*.vsix
-          if-no-files-found: error
+          tag_name: v${{ steps.bump_versions.outputs.new_version }}
+          release_name: Release v${{ steps.bump_versions.outputs.new_version }}
+          body: Automated release for v${{ steps.bump_versions.outputs.new_version }}
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to GitHub Container Registry
-        if: success()
-        uses: docker/login-action@v3
+      - name: Upload VSIX to Release
+        uses: actions/upload-release-asset@v1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: vscode-extension/*.vsix
+          asset_name: home-ai-agent-vsix-v${{ steps.bump_versions.outputs.new_version }}.vsix
+          asset_content_type: application/octet-stream
 
-      - name: Install ORAS client
-        if: success()
-        uses: oras-project/setup-oras@v1
-
-      - name: Publish VSIX to GitHub Packages (GHCR)
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.bump_versions.outputs.new_version }}"
-          OWNER_LOWER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          IMAGE="ghcr.io/${OWNER_LOWER}/home-ai-agent-extension"
-          VSIX_PATH="$(ls vscode-extension/*.vsix | head -n 1)"
-
-          oras push "${IMAGE}:v${VERSION}" \
-            --artifact-type "application/vnd.home-ai-agent.vsix" \
-            --annotation "org.opencontainers.image.title=home-ai-agent-vsix" \
-            --annotation "org.opencontainers.image.version=v${VERSION}" \
-            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            "${VSIX_PATH}:application/vsix"
-
-          oras push "${IMAGE}:latest" \
-            --artifact-type "application/vnd.home-ai-agent.vsix" \
-            --annotation "org.opencontainers.image.title=home-ai-agent-vsix" \
-            --annotation "org.opencontainers.image.version=v${VERSION}" \
-            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            "${VSIX_PATH}:application/vsix"
+      # GHCR/ORAS publishing removed — using GitHub Releases for VSIX assets
